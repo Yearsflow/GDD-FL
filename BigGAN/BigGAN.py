@@ -30,12 +30,20 @@ def G_arch(ch=64, attention='64', ksize='333333', dilation='111111'):
                'resolution' : [8, 16, 32, 64, 128, 256],
                'attention' : {2**i: (2**i in [int(item) for item in attention.split('_')])
                               for i in range(3,9)}}
-  arch[224] = {'in_channels' :  [ch * item for item in [16, 16, 8, 8, 4, 2]],
-               'out_channels' : [ch * item for item in [16,  8, 8, 4, 2, 1]],
-               'upsample' : [True] * 6,
-               'resolution' : [7, 14, 28, 56, 112, 224],
-               'attention' : {2**i + 2**(i-1) + 2**(i-2): (2**i + 2**(i-1) + 2**(i-2) in [int(item) for item in attention.split('_')])
-                              for i in range(2,8)}}
+  # arch[224] = {'in_channels' :  [ch * item for item in [16, 16, 8, 8, 4, 2]],
+  #              'out_channels' : [ch * item for item in [16,  8, 8, 4, 2, 1]],
+  #              'upsample' : [True] * 6,
+  #              'resolution' : [7, 14, 28, 56, 112, 224],
+  #              'attention' : {2**i + 2**(i-1) + 2**(i-2): (2**i + 2**(i-1) + 2**(i-2) in [int(item) for item in attention.split('_')])
+  #                             for i in range(2,8)}}
+  arch[224] = {'in_channels' :  [ch * item for item in [16, 16, 8, 8, 4, 2, 1]],
+               'out_channels' : [ch * item for item in [16,  8, 8, 4, 2, 1, 1]],
+               'upsample' : [True] * 7,
+               'resolution' : [8, 16, 32, 64, 128, 192, 224],
+               'attention' : {2**i: (2**i in [int(item) for item in attention.split('_')])
+                              for i in range(3,10)}}
+  arch[224]['attention'][192] = False
+  arch[224]['attention'][224] = False
   arch[128] = {'in_channels' :  [ch * item for item in [16, 16, 8, 4, 2]],
                'out_channels' : [ch * item for item in [16, 8, 4, 2, 1]],
                'upsample' : [True] * 5,
@@ -58,7 +66,7 @@ def G_arch(ch=64, attention='64', ksize='333333', dilation='111111'):
   return arch
 
 class Generator(nn.Module):
-  def __init__(self, G_ch=64, dim_z=128, bottom_width=6, resolution=128,
+  def __init__(self, G_ch=64, dim_z=128, bottom_width=14, resolution=128,
                G_kernel_size=3, G_attn='64', n_classes=1000,
                num_G_SVs=1, num_G_SV_itrs=1,
                G_shared=True, shared_dim=0, hier=False,
@@ -266,12 +274,20 @@ def D_arch(ch=64, attention='64',ksize='333333', dilation='111111'):
                'resolution' : [128, 64, 32, 16, 8, 4, 4 ],
                'attention' : {2**i: 2**i in [int(item) for item in attention.split('_')]
                               for i in range(2,8)}}
-  arch[224] = {'in_channels' :  [3] + [ch*item for item in [1, 2, 4, 8, 16]],
-               'out_channels' : [item * ch for item in [1, 2, 4, 8, 16, 16]],
-               'downsample' : [True] * 5 + [False],
-               'resolution' : [112, 56, 28, 14, 7, 7],
-               'attention' : {2**i + 2**(i-1) + 2**(i-2): (2**i + 2**(i-1) + 2**(i-2) in [int(item) for item in attention.split('_')])
+  # arch[224] = {'in_channels' :  [3] + [ch*item for item in [1, 2, 4, 8, 16]],
+  #              'out_channels' : [item * ch for item in [1, 2, 4, 8, 16, 16]],
+  #              'downsample' : [True] * 5 + [False],
+  #              'resolution' : [112, 56, 28, 14, 7, 7],
+  #              'attention' : {2**i + 2**(i-1) + 2**(i-2): (2**i + 2**(i-1) + 2**(i-2) in [int(item) for item in attention.split('_')])
+  #                             for i in range(2,8)}}
+  arch[224] = {'in_channels' :  [3] + [ch*item for item in [1, 2, 4, 8, 8, 16]],
+               'out_channels' : [item * ch for item in [1, 2, 4, 8, 8, 16, 16]],
+               'downsample' : [True] * 6 + [False],
+               'resolution' : [192, 128, 64, 32, 16, 8, 8],
+               'attention' : {2**i: 2**i in [int(item) for item in attention.split('_')]
                               for i in range(2,8)}}
+  arch[224]['attention'][192] = False
+  arch[224]['attention'][224] = False
   arch[128] = {'in_channels' :  [3] + [ch*item for item in [1, 2, 4, 8, 16]],
                'out_channels' : [item * ch for item in [1, 2, 4, 8, 16, 16]],
                'downsample' : [True] * 5 + [False],
