@@ -24,6 +24,19 @@ def mkdirs(dirpath):
     except Exception as _:
         pass
 
+def get_dataset_info(dataset):
+        
+    if dataset == 'mnist':
+        return 10, 1, (28, 28), [0.1307], [0.3081]
+    elif dataset == 'cifar10':
+        return 10, 3, (32, 32), [x / 255.0 for x in [125.3, 123.0, 113.9]], [x / 255.0 for x in [63.0, 62.1, 66.7]]
+    elif dataset == 'isic2020':
+        return 2, 3, (224, 224), [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    elif dataset == 'EyePACS':
+        return 5, 3, (224, 224), [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    else:
+        raise NotImplementedError('Dataset Not Supported')
+
 def get_dataloader(args, request='dataloader'):
 
     num_per_class = None

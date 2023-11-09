@@ -7,7 +7,7 @@ import json
 import datetime
 import logging
 from options import get_args
-from utils import mkdirs, seed_everything
+from utils import mkdirs, seed_everything, get_dataset_info
 from PIL import ImageFile
 
 if __name__ == '__main__':
@@ -18,16 +18,8 @@ if __name__ == '__main__':
     if args.device != 'cpu':
         os.environ['CUDA_VISIBLE_DEVICES'] = args.device
         args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if args.dataset == 'isic2020':
-        args.n_classes = 2
-    elif args.dataset == 'EyePACS':
-        args.n_classes = 5
-    elif args.dataset == 'cifar100':
-        args.n_classes = 100
-    elif args.dataset in {'mnist', 'cifar10'}:
-        args.n_classes = 10
-    else:
-        raise NotImplementedError('Dataset Not Supported')
+    args.n_classes, args.channel, args.im_size, \
+    args.mean, args.std = get_dataset_info(args.dataset)
 
     if args.mode == 'Fed':
         if args.approach == 'fedavg':
@@ -36,6 +28,8 @@ if __name__ == '__main__':
             from Fed.fedproto import FedProto as alg
         elif args.approach == 'feddc' or args.approach == 'feddsa' or args.approach == 'feddm':
             from Fed.feddistill import FedDistill as alg
+        elif args.approach == 'fedgan':
+            from Fed.fedgan import FedGAN as alg
         else:
             raise NotImplementedError('Approach Not Implemented')
     elif args.mode == 'UpperBound':
