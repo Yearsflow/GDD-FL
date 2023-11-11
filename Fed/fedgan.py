@@ -13,6 +13,8 @@ from dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
 from utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from networks import Generator, Discriminator
+from torch.autograd import Variable
 
 class FedGAN(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -25,9 +27,150 @@ class FedGAN(FedDistill):
 
         parser.add_argument('--diffaug_choice', type=str, default='Auto',
                             help='DSA augmentation choice')
+        parser.add_argument('--pt_lr', type=float, default=0.01,
+                            help='learning rate for pre-training network')
+        parser.add_argument('--pt_optim', type=str, default='sgd', 
+                            help='optimizer for pre-training network')
+        parser.add_argument('--pt_epochs', type=int, default=100,
+                            help='number of epochs for pre-training network')
+        parser.add_argument('--pt_bs', type=int, default=64,
+                            help='batch size for pre-training network')
+        parser.add_argument('--pt_momentum', type=float, default=0.9,
+                            help='momentum for pre-training network')
+        parser.add_argument('--pt_decay', type=float, default=1e-5,
+                            help='weight decay for pre-training network')
+        parser.add_argument('--GAN_lr', type=float, default=0.00005,
+                            help='learning rate for training WGAN')
+        parser.add_argument('--GAN_epochs', type=int, default=200,
+                            help='number of epochs for training WGAN')
+        parser.add_argument('--n_critic', type=int, default=5, 
+                            help='number of training steps for discriminator per iter')
+        parser.add_argument('--clip_value', type=float, default=0.01,
+                            help='lower and upper clip value for disc. weights')
 
         return parser.parse_args(extra_args)
+
+    def local_pretrain(self, net, train_dl, val_dl):
+
+        criterion = nn.CrossEntropyLoss()
+        if self.appr_args.pt_optim == 'sgd':
+            optimizer = optim.SGD(net.parameters(), lr=self.appr_args.pt_lr, 
+                                  momentum=self.appr_args.pt_momentum,
+                                  weight_decay=self.appr_args.pt_decay)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
+
+        best_metric, best_w = 0, None
+
+        for ep in range(self.appr_args.pt_epochs):
+            epoch_loss_collector = []
+            total, correct = 0, 0
+            logits, labels = [], []
+
+            net.train()
+            for batch_idx, (x, target) in enumerate(train_dl):
+                x = x.to(self.args.device, non_blocking=True)
+                target = target.long().to(self.args.device, non_blocking=True)
+                optimizer.zero_grad()
+                out = net(x)
+
+                loss = criterion(out, target)
+                total += x.data.size()[0]
+                correct += (pred_label == target.data).sum().item()
+                _, pred_label = torch.max(out.data, 1)
+                if self.args.n_classes > 2:
+                    logits.append(F.softmax(out, dim=1).detach().cpu().tolist())
+                else:
+                    logits.append(F.softmax(out, dim=1).detach().cpu().tolist()[1])
+                labels += target.data.cpu().tolist()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss_collector.append(loss.item())
+
+            epoch_train_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+            epoch_train_acc = correct / float(total)
+            if self.args.n_classes > 2:
+                epoch_train_auc = roc_auc_score(np.array(labels), np.array(logits), multi_class='ovo', labels=[_ for _ in range(self.args.n_classes)])
+            else:
+                epoch_train_auc = roc_auc_score(np.array(labels), np.array(logits))
+            
+            epoch_loss_collector = []
+            logits, labels = [], []
+            total, correct = 0, 0
+
+            net.eval()
+            with torch.no_grad():
+                for batch_idx, (x, target) in enumerate(val_dl):
+                    x = x.to(self.args.device, non_blocking=True)
+                    target = target.long().to(self.args.device, non_blocking=True)
+                    out = net(x)
+
+                    loss = criterion(out, target)
+                    _, pred_label = torch.max(out.data, 1)
+                    if self.args.n_classes > 2:
+                        logits.append(F.softmax(out, dim=1).detach().cpu().tolist())
+                    else:
+                        logits.append(F.softmax(out, dim=1).detach().cpu().tolist()[1])
+                    labels += target.data.cpu().tolist()
+                    epoch_loss_collector.append(loss.item())
+                    total += x.data.size()[0]
+                    correct += (pred_label == target.data).sum().item()
+
+            epoch_val_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
+            epoch_val_acc = correct / float(total)
+            if self.args.n_classes > 2:
+                epoch_val_auc = roc_auc_score(np.array(labels), np.array(logits), multi_class='ovo', labels=[_ for _ in range(self.args.n_classes)])
+            else:
+                epoch_val_auc = roc_auc_score(np.array(labels), np.array(logits))
+            
+            if self.args.dataset in ['isic2020', 'EyePACS']:
+                scheduler.step(epoch_val_auc)
+                if epoch_val_auc > best_metric:
+                    best_metric = epoch_val_auc
+                    best_w = copy.deepcopy(net.state_dict())
+            else:
+                scheduler.step(epoch_val_acc)
+                if epoch_val_acc > best_metric:
+                    best_metric = epoch_val_acc
+                    best_w = copy.deepcopy(net.state_dict())
+
+            self.logger.info('Epoch: %d Train loss: %f Train Acc: %f Train AUC: %f Val loss: %f Val Acc: %f Val AUC: %f' %
+                             (ep, epoch_train_loss, epoch_train_acc, epoch_train_auc, epoch_val_loss, epoch_val_acc, epoch_train_auc))
+
+        return best_w
     
+    def train_WGAN(self, G, D, train_dl, latent_dim=128):
+
+        optimizer_G = optim.RMSprop(G.parameters(), lr=self.appr_args.GAN_lr)
+        optimizer_D = optim.RMSprop(D.parameters(), lr=self.appr_args.GAN_lr)
+
+        for ep in range(self.appr_args.GAN_epochs):
+            for batch_idx, (x, target) in enumerate(train_dl):
+                real_imgs = Variable(x.to(self.args.device))
+                optimizer_D.zero_grad()
+
+                z = Variable(torch.tensor(np.random.normal(0, 1, (x.shape[0], latent_dim)), dtype=torch.FloatTensor))
+
+                fake_imgs = G(z).detach()
+                loss_D = -torch.mean(D(real_imgs)) + torch.mean(D(fake_imgs))
+
+                loss_D.backward()
+                optimizer_D.step()
+
+                for p in D.parameters():
+                    p.data.clamp_(-self.appr_args.clip_value, self.appr_args.clip_value)
+
+                if batch_idx % self.appr_args.n_critic == 0:
+
+                    optimizer_G.zero_grad()
+                    gen_imgs = G(z)
+                    loss_G = -torch.mean(D(gen_imgs))
+
+                    loss_G.backward()
+                    optimizer_G.step()
+            
+                    self.logger.info('Epoch: %d Batch: %d D loss: %f G loss: %f' % (ep, batch_idx, loss_D.item(), loss_G.item()))
+
     def run(self):
 
         if self.appr_args.diffaug_choice == 'Auto':
@@ -38,4 +181,53 @@ class FedGAN(FedDistill):
         else:
             self.appr_args.diffaug_choice = 'None'
         
-        
+        self.logger.info('Partitioning data...')
+
+        train_ds, val_ds, test_ds, num_per_class = get_dataloader(self.args, request='dataset')
+        self.party2dataidx = self.partition(train_ds, val_ds)
+
+        self.logger.info('Training begins...')
+
+        for round in range(self.args.n_comm_round):
+            self.logger.info('Communication Round: %d' % round)
+            party_list_this_round = random.sample([_ for _ in range(self.args.C)], 
+                                                int(self.args.C * self.args.sample_fraction))
+            party_list_this_round.sort()
+
+            for client_idx in party_list_this_round:
+                self.logger.info('Client %d' % client_idx)
+
+                train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][client_idx])
+                val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][client_idx])
+                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                                    batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
+                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=16*self.args.test_bs,
+                                    batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
+                
+                self.logger.info('Train batches: %d' % len(train_dl))
+                self.logger.info('Val batches: %d' % len(val_dl))
+
+                self.logger.info('Initialize local feature extractor')
+                local_net = get_network(self.args)
+                if self.args.device != 'cpu':
+                    local_net = nn.DataParallel(local_net)
+                    local_net.to(self.args.device)
+                
+                self.logger.info('Organize the real dataset')
+                labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][client_idx]]
+                indices_class = [[] for _ in range(self.args.n_classes)]
+                for _, lab in enumerate(labels_all):
+                    indices_class[lab].append(_)
+                for _ in range(self.args.n_classes):
+                    self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
+
+                self.logger.info('Pretrain feature extractor')
+                w = self.local_pretrain(local_net, train_dl, val_dl)
+                local_net.load_state_dict(w)
+
+                self.logger.info('Train WGAN')
+                img_shape = (self.args.channel, self.args.im_size[0], self.args.im_size[1])
+                local_G = Generator(img_shape=img_shape)
+                local_D = Discriminator(img_shape=img_shape)
+
+                self.train_WGAN(local_G, local_D, train_dl)
