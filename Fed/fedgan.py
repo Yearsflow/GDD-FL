@@ -87,6 +87,7 @@ class FedGAN(FedDistill):
                 out = net(x)
 
                 loss = criterion(out, target)
+                _, pred_label = torch.max(out, 1)
                 total += x.data.size()[0]
                 correct += (pred_label == target.data).sum().item()
                 _, pred_label = torch.max(out.data, 1)
