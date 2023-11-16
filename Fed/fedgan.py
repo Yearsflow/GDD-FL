@@ -41,7 +41,7 @@ class FedGAN(FedDistill):
                             help='weight decay for pre-training network')
         parser.add_argument('--GAN_lr', type=float, default=0.00005,
                             help='learning rate for training WGAN')
-        parser.add_argument('--GAN_epochs', type=int, default=200,
+        parser.add_argument('--GAN_epochs', type=int, default=2000,
                             help='number of epochs for training WGAN')
         parser.add_argument('--n_critic', type=int, default=5, 
                             help='number of training steps for discriminator per iter')
@@ -322,6 +322,15 @@ class FedGAN(FedDistill):
 
         return z
     
+    def renormalize(self, img):
+
+        mean_GAN = [0.5, 0.5, 0.5]
+        std_GAN = [0.5, 0.5, 0.5]
+        
+        return torch.cat([(((img[:, 0] * std_GAN[0] + mean_GAN[0]) - self.args.mean[0]) / self.args.std[0]).unsqueeze(1),
+                          (((img[:, 1] * std_GAN[1] + mean_GAN[1]) - self.args.mean[1]) / self.args.std[1]).unsqueeze(1),
+                          (((img[:, 2] * std_GAN[2] + mean_GAN[2]) - self.args.mean[2]) / self.args.std[2]).unsqueeze(1)], dim=1)
+    
     def get_synthetic_data(self, G, z):
 
         syn_data = {
@@ -334,6 +343,8 @@ class FedGAN(FedDistill):
                 z_c = torch.tensor(z[i][c][:self.appr_args.ipc], device=self.args.device).detach()
                 lab_c = torch.tensor([c for _ in range(self.appr_args.ipc)], dtype=torch.long)
                 img_syn = copy.deepcopy(G(z_c))
+                img_syn = self.renormalize(img_syn)
+                img_syn = img_syn.view(self.args.channel, self.args.im_size[0], self.args.im_size[1])
                 for j in range(len(img_syn)):
                     syn_data['images'].append(img_syn[j].detach().cpu())
                 for j in range(len(lab_c)):
