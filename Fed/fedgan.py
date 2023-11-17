@@ -92,9 +92,11 @@ class FedGAN(FedDistill):
                 correct += (pred_label == target.data).sum().item()
                 _, pred_label = torch.max(out.data, 1)
                 if self.args.n_classes > 2:
-                    logits.append(F.softmax(out, dim=1).cpu().tolist())
+                    for i in range(len(out)):
+                            logits.append(F.softmax(out[i], dim=0).cpu().tolist())
                 else:
-                    logits.append(F.softmax(out, dim=1).cpu().tolist()[1])
+                    for i in range(len(out)):
+                        logits.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 labels += target.cpu().tolist()
                 loss.backward()
                 optimizer.step()
@@ -123,9 +125,11 @@ class FedGAN(FedDistill):
                     loss = criterion(out, target)
                     _, pred_label = torch.max(out.data, 1)
                     if self.args.n_classes > 2:
-                        logits.append(F.softmax(out, dim=1).detach().cpu().tolist())
+                        for i in range(len(out)):
+                            logits.append(F.softmax(out[i], dim=0).cpu().tolist())
                     else:
-                        logits.append(F.softmax(out, dim=1).detach().cpu().tolist()[1])
+                        for i in range(len(out)):
+                            logits.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                     labels += target.data.cpu().tolist()
                     epoch_loss_collector.append(loss.item())
                     total += x.data.size()[0]
@@ -152,7 +156,7 @@ class FedGAN(FedDistill):
 
             if self.args.dataset in ['isic2020', 'EyePACS']:
                 self.logger.info('Epoch: %d Train loss: %f Train Acc: %f Train AUC: %f Val loss: %f Val Acc: %f Val AUC: %f' %
-                                (ep, epoch_train_loss, epoch_train_acc, epoch_train_auc, epoch_val_loss, epoch_val_acc, epoch_train_auc))
+                                (ep, epoch_train_loss, epoch_train_acc, epoch_train_auc, epoch_val_loss, epoch_val_acc, epoch_val_auc))
             else:
                 self.logger.info('Epoch: %d Train loss: %f Train Acc: %f Val loss: %f Val Acc: %f' %
                                 (ep, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc))
