@@ -395,7 +395,13 @@ class FedGAN(FedDistill):
                 self.logger.info('Val batches: %d' % len(val_dl))
 
                 self.logger.info('Initialize local feature extractor')
-                local_net = get_network(self.args)
+                if self.args.dataset in ['mnist', 'cifar10']:
+                    model = self.args.model
+                    self.args.model = 'ConvNet'
+                    local_net = get_network(self.args)
+                    self.args.model = model
+                else:
+                    local_net = get_network(self.args)
                 if self.args.device != 'cpu':
                     local_net = nn.DataParallel(local_net)
                     local_net.to(self.args.device)
