@@ -12,9 +12,13 @@ from .feddistill import FedDistill
 from dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from utils import get_dataloader, DatasetSplit, get_network, get_loops
 from networks import Generator, Discriminator
 from torch.autograd import Variable
+from dream_utils import Normalize
+from dream_augment import DiffAug
+from torchvision import transforms
+from dream_strategy import NEW_Strategy
 
 class FedDream(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -25,7 +29,41 @@ class FedDream(FedDistill):
     def extra_parser(extra_args):
         parser = argparse.ArgumentParser()
 
+        parser.add_argument('--aug_type', type=str, default='color_crop_cutout',
+                            help='augmentation strategy for condensation matching')
+        parser.add_argument('--mixup_net', type=str, default='cut', choices=('vanilla', 'cut'),
+                            help='mixup choice for training networks in condensation stage')
+        parser.add_argument('--ipc', type=int, default=1,
+                            help='number of condensed data per class')
+        parser.add_argument('--batch_real', type=int, default=64,
+                            help='batch size for real training data used for matching')
+
         return parser.parse_args(extra_args)
+    
+    def remove_aug(self, augtype, remove_aug):
+        aug_list = []
+        for aug in augtype.split('_'):
+            if aug not in remove_aug.split('_'):
+                aug_list.append(aug)
+        
+        return '_'.join(aug_list)
+
+    def diffaug(self):
+        """Differentiable augmentation for condensation
+        """
+        aug_type = self.appr_args.aug_type
+        normalize = Normalize(mean=self.args.mean, std=self.args.std, device=self.args.device)
+        self.logger.info('Augmentataion Matching: %s' % aug_type)
+        augment = DiffAug(strategy=aug_type, batch=True)
+        aug_batch = transforms.Compose([normalize, augment])
+
+        if self.appr_args.mixup_net == 'cut':
+            aug_type = self.remove_aug(aug_type, 'cutout')
+        self.logger.info('Augmentataion Net update: %s' % aug_type)
+        augment_rand = DiffAug(strategy=aug_type, batch=False)
+        aug_rand = transforms.Compose([normalize, augment_rand])
+
+        return aug_batch, aug_rand
     
     def run(self):
 
@@ -126,4 +164,15 @@ class FedDream(FedDistill):
                 optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, 
                                           momentum=self.args.momentum, weight_decay=self.args.weight_decay)
                 criterion = nn.CrossEntropyLoss()
+                aug, aug_rand = self.diffaug(self.args)
+
+                self.logger.info('KMean initialize synset')
+                for c in range(self.args.n_classes):
+                    indices = indices_class[c][:self.appr_args.ipc]
+                    img = torch.stack([train_ds_c[i][0] for i in indices])
+                    strategy = NEW_Strategy(img, net)
+                    query_idxs = strategy.query(self.appr_args.ipc)
+                    image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img.data.to(self.args.device)
                 
+                query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
+                                          dtype=torch.long, requires_grad=False, device=self.args.device)
