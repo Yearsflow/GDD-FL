@@ -37,6 +37,10 @@ class FedDream(FedDistill):
                             help='number of condensed data per class')
         parser.add_argument('--batch_real', type=int, default=64,
                             help='batch size for real training data used for matching')
+        parser.add_argument('--lr_img', type=float, default=5e-3,
+                            help='condensed data learning rate')
+        parser.add_argument('--mom_img', type=float, default=0.5,
+                            help='condensed data momentum')
 
         return parser.parse_args(extra_args)
     
@@ -64,6 +68,28 @@ class FedDream(FedDistill):
         aug_rand = transforms.Compose([normalize, augment_rand])
 
         return aug_batch, aug_rand
+    
+    def img_denormalize(self, img):
+        """Scaling and shift a batch of images (NCHW)
+        """
+        mean = self.args.mean
+        std = self.args.std
+        nch = img.shape[1]
+
+        mean = torch.tensor(mean, device=img.device).reshape(1, nch, 1, 1)
+        std = torch.tensor(std, device=img.device).reshape(1, nch, 1, 1)
+
+        return img * std + mean
+    
+    def save_img(self, save_dir, img, unnormalize=True, max_num=200, size=64, nrow=10):
+        img = img[:max_num].detach()
+        if unnormalize:
+            img = self.img_denormalize(img)
+        img = torch.clamp(img, min=0., max=1.)
+
+        if img.shape[-1] > size:
+            img = F.interpolate(img, size)
+        save_image(img.cpu(), save_dir, nrow=nrow)
     
     def run(self):
 
@@ -176,3 +202,15 @@ class FedDream(FedDistill):
                 
                 query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
                                           dtype=torch.long, requires_grad=False, device=self.args.device)
+                self.logger.info('init_size: ', image_syn.data.size())
+                save_name = os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'init_client{}_'.format(c_idx)+self.args.log_file_name+'.png')
+                self.save_img(save_name, image_syn.data, unnormalize=False)
+
+                self.logger.info('Condense begins...')
+                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, val_ds_c)
+
+
+    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, val_ds):
+
+        optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
+        
