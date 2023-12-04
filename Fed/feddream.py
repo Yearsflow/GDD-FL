@@ -19,6 +19,7 @@ from dream_utils import Normalize
 from dream_augment import DiffAug
 from torchvision import transforms
 from dream_strategy import NEW_Strategy
+import math
 
 class FedDream(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -41,6 +42,24 @@ class FedDream(FedDistill):
                             help='condensed data learning rate')
         parser.add_argument('--mom_img', type=float, default=0.5,
                             help='condensed data momentum')
+        parser.add_argument('--iter', type=int, default=300,
+                            help='distilling iterations')
+        parser.add_argument('--fix_iter', type=int, default=-1,
+                            help='number of outer iteration maintaining the condensation networks')
+        parser.add_argument('--factor', type=int, default=2,
+                            help='multi-formation factor. (1 for IDC-I)')
+        parser.add_argument('--decode_type', type=str, default='single', choices=['single', 'multi', 'bound'],
+                            help='multi-formation type')
+        parser.add_argument('--bias', type=bool, default=False, 
+                            help='match bias or not')
+        parser.add_argument('--fc', type=bool, default=False, 
+                            help='match fc layer or not')
+        parser.add_argument('--interval', type=int, default=10,
+                            help='cluster every interval inner loop')
+        parser.add_argument('--metric', type=str, default='l1', choices=['mse', 'l1', 'l1_mean', 'l2', 'cos'],
+                            help='matching objective')
+        parser.add_argument('--inner_loop', type=int, default=100,
+                            help='number of inner iteration')
 
         return parser.parse_args(extra_args)
     
@@ -100,32 +119,6 @@ class FedDream(FedDistill):
         elif self.args.approach == 'feddsa':
             self.appr_args.dsa = True
         self.appr_args.outer_loop, self.appr_args.inner_loop = get_loops(self.appr_args.ipc)
-        if self.args.dataset == 'isic2020':
-            self.appr_args.n_classes = 2
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (224, 224)
-            self.appr_args.mean = [0.485, 0.456, 0.406]
-            self.appr_args.std = [0.229, 0.224, 0.225]
-        elif self.args.dataset == 'EyePACS':
-            self.appr_args.n_classes = 5
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (224, 224)
-            self.appr_args.mean = [0.485, 0.456, 0.406]
-            self.appr_args.std = [0.229, 0.224, 0.225]
-        elif self.args.dataset == 'mnist':
-            self.appr_args.n_classes = 10
-            self.appr_args.channel = 1
-            self.appr_args.im_size = (28, 28)
-            self.appr_args.mean = [0.1307]
-            self.appr_args.std = [0.3081]
-        elif self.args.dataset == 'cifar10':
-            self.appr_args.n_classes = 10
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (32, 32)
-            self.appr_args.mean = [x / 255.0 for x in [125.3, 123.0, 113.9]]
-            self.appr_args.std = [x / 255.0 for x in [63.0, 62.1, 66.7]]
-        else:
-            raise NotImplementedError('Dataset Not Supported')
         
         self.logger.info('Partitioning data...')
         
@@ -200,17 +193,169 @@ class FedDream(FedDistill):
                     query_idxs = strategy.query(self.appr_args.ipc)
                     image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img.data.to(self.args.device)
                 
-                query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
-                                          dtype=torch.long, requires_grad=False, device=self.args.device)
                 self.logger.info('init_size: ', image_syn.data.size())
                 save_name = os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'init_client{}_'.format(c_idx)+self.args.log_file_name+'.png')
                 self.save_img(save_name, image_syn.data, unnormalize=False)
 
                 self.logger.info('Condense begins...')
-                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, val_ds_c)
+                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, val_ds_c, aug, aug_rand)
 
+    def decode_zoom(self, img, target, factor):
+        """Uniform multi-formation
+        """
+        h = img.shape[-1]
+        remained = h % factor
+        if remained > 0:
+            img = F.pad(img, pad=(0, factor - remained, 0, factor - remained), value=0.5)
+        s_crop = math.ceil(h / factor)
+        n_crop = factor**2
 
-    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, val_ds):
+        cropped = []
+        for i in range(factor):
+            for j in range(factor):
+                h_loc = i * s_crop
+                w_loc = j * s_crop
+                cropped.append(img[:, :, h_loc:h_loc + s_crop, w_loc:w_loc + s_crop])
+        cropped = torch.cat(cropped)
+        data_dec = nn.Upsample(size=self.im_size, mode='bilinear')(cropped)
+        target_dec = torch.cat([target for _ in range(n_crop)])
+
+        return data_dec, target_dec
+
+    def decode(self, data, target, bound=128):
+        """Multi-formation
+        """
+        if self.appr_args.factor > 1:
+            if self.appr_args.decode_type == 'multi':
+                data, target = self.decode_zoom_multi(data, target, self.appr_args.factor)
+            elif self.appr_args.decode_type == 'bound':
+                data, target = self.decode_zoom_bound(data, target, self.appr_args.factor, bound=bound)
+            else:
+                data, target = self.decode_zoom(data, target, self.appr_args.factor)
+
+        return data, target
+    
+    def subsample(self, data, target, max_size=-1):
+        if (data.shape[0] > max_size) and (max_size > 0):
+            indices = np.random.permutation(data.shape[0])
+            data = data[indices[:max_size]]
+            target = target[indices[:max_size]]
+
+        return data, target
+
+    def sample(self, c, image_syn, label_syn, max_size=128):
+        """Sample synthetic data per class
+        """
+        idx_from = self.appr_args.ipc * c
+        idx_to = self.appr_args.ipc * (c + 1)
+        data = image_syn[idx_from:idx_to]
+        target = label_syn[idx_from:idx_to]
+
+        data, target = self.decode(data, target, bound=max_size)
+        data, target = self.subsample(data, target, max_size=max_size)
+        return data, target
+    
+    def dist(self, x, y, method='mse'):
+        """Distance objectives
+        """
+        if method == 'mse':
+            dist_ = (x - y).pow(2).sum()
+        elif method == 'l1':
+            dist_ = (x - y).abs().sum()
+        elif method == 'l1_mean':
+            n_b = x.shape[0]
+            dist_ = (x - y).abs().reshape(n_b, -1).mean(-1).sum()
+        elif method == 'cos':
+            x = x.reshape(x.shape[0], -1)
+            y = y.reshape(y.shape[0], -1)
+            dist_ = torch.sum(1 - torch.sum(x * y, dim=-1) /
+                            (torch.norm(x, dim=-1) * torch.norm(y, dim=-1) + 1e-6))
+
+        return dist_
+
+    def add_loss(self, loss_sum, loss):
+        if loss_sum == None:
+            return loss
+        else:
+            return loss_sum + loss
+    
+    def match_loss(self, img_real, img_syn, lab_real, lab_syn, model):
+        """Matching losses (gradient)
+        """
+        criterion = nn.CrossEntropyLoss()
+
+        output_real = model(img_real)
+        loss_real = criterion(output_real, lab_real)
+        g_real = torch.autograd.grad(loss_real, model.parameters())
+        g_real = list((g.detach() for g in g_real))
+
+        output_syn = model(img_syn)
+        loss_syn = criterion(output_syn, lab_syn)
+        g_syn = torch.autograd.grad(loss_syn, model.parameters(), create_graph=True)
+
+        for i in range(len(g_real)):
+            if (len(g_real[i].shape) == 1) and not self.appr_args.bias:  # bias, normliazation
+                continue
+            if (len(g_real[i].shape) == 2) and not self.appr_args.fc:
+                continue
+
+            loss = self.add_loss(loss, self.dist(g_real[i], g_syn[i], method=self.appr_args.metric))
+
+        return loss
+
+    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, val_ds, aug, aug_rand):
 
         optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
-        
+        self.appr_args.fix_iter = max(1, self.appr_args.fix_iter)
+        query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
+                                dtype=torch.long, requires_grad=False, device=self.args.device)
+
+        for it in range(self.appr_args.iter):
+            if it % self.appr_args.fix_iter == 0 and it != 0:
+                if self.args.dataset in ['mnist', 'cifar10']:
+                    model = self.args.model
+                    self.args.model = 'ConvNet'
+                    net = get_network(self.args)
+                    self.args.model = model
+                else:
+                    net = get_network(self.args)
+                if self.args.device != 'cpu':
+                    net = nn.DataParallel(net)
+                    net.to(self.args.device)
+                net.train()
+                optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum, 
+                                            weight_decay=self.args.weight_decay)
+                criterion = nn.CrossEntropyLoss()
+
+            loss_total = 0
+            image_syn.data = torch.clamp(image_syn.data, min=0., max=1.)
+            
+            for il in range(self.appr_args.inner_loop):
+                for c in range(self.args.n_classes):
+
+                    indices = indices_class[c]
+                    img_c = torch.stack([train_ds[i][0] for i in indices])
+
+                    if il % self.appr_args.interval == 0:
+                        strategy = NEW_Strategy(img_c, net)
+                        query_idxs = strategy.query(self.appr_args.batch_real)
+                        query_list[c] = query_idxs
+
+                    img = img_c[query_list[c]]
+                    lab = torch.tensor([np.ones(img.size(0))*c], dtype=torch.long, requires_grad=False, device=self.args.device).view(-1)
+                    img_syn, lab_syn = self.sample(c, image_syn, label_syn, max_size=self.appr_args.batch_syn_max)
+                    n = img.shape[0]
+                    img_aug = aug(torch.cat([img, img_syn]))
+                    
+                    loss = self.match_loss(img_aug[:n], img_aug[n:], lab, lab_syn, net)
+                    loss_total += loss.item()
+
+                    optimizer_img.zero_grad()
+                    loss.backward()
+                    optimizer_img.step()
+
+                train_epoch(net, train_ds, criterion, optimizer_net, aug=aug_rand)
+
+            if it % 10 == 0:
+                self.logger.info('Iter: %03d loss: %.3f' % (it, loss_total / self.args.n_classes / self.appr_args.inner_loop))
+            
