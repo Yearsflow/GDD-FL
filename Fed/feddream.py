@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from utils import get_dataloader, DatasetSplit, get_network, get_loops
 from networks import Generator, Discriminator
 from torch.autograd import Variable
-from dream_utils import Normalize
+from dream_utils import Normalize, random_indices, rand_bbox
 from dream_augment import DiffAug
 from torchvision import transforms
 from dream_strategy import NEW_Strategy
@@ -60,6 +60,10 @@ class FedDream(FedDistill):
                             help='matching objective')
         parser.add_argument('--inner_loop', type=int, default=100,
                             help='number of inner iteration')
+        parser.add_argument('--mix_p', type=float, default=1.0,
+                            help='mixup probability')
+        parser.add_argument('--beta', default=1.0, type=float, 
+                            help='mixup beta distribution')
 
         return parser.parse_args(extra_args)
     
@@ -111,14 +115,6 @@ class FedDream(FedDistill):
         save_image(img.cpu(), save_dir, nrow=nrow)
     
     def run(self):
-
-        self.appr_args.dsa_param = ParamDiffAug()
-        self.appr_args.dsa = False if self.appr_args.dsa_strategy in ['none', 'None'] else True
-        if self.args.approach == 'feddc':
-            self.appr_args.dsa = False
-        elif self.args.approach == 'feddsa':
-            self.appr_args.dsa = True
-        self.appr_args.outer_loop, self.appr_args.inner_loop = get_loops(self.appr_args.ipc)
         
         self.logger.info('Partitioning data...')
         
@@ -198,7 +194,7 @@ class FedDream(FedDistill):
                 self.save_img(save_name, image_syn.data, unnormalize=False)
 
                 self.logger.info('Condense begins...')
-                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, val_ds_c, aug, aug_rand)
+                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, aug, aug_rand)
 
     def decode_zoom(self, img, target, factor):
         """Uniform multi-formation
@@ -302,13 +298,48 @@ class FedDream(FedDistill):
             loss = self.add_loss(loss, self.dist(g_real[i], g_syn[i], method=self.appr_args.metric))
 
         return loss
+    
+    def train_epoch(self, net, train_dl, criterion, optimizer_net, aug, mixup):
 
-    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, val_ds, aug, aug_rand):
+        net.train()
+        for batch_idx, (x, target) in enumerate(train_dl):
+            x = x.to(self.args.device)
+            target = target.long().to(self.args.device)
+
+            if aug != None:
+                with torch.no_grad():
+                    x = aug(x)
+            
+            r = np.random.rand(1)
+            if r < self.appr_args.mix_p and mixup == 'cut':
+                # generate mixed sample
+                lam = np.random.beta(self.appr_args.beta, self.appr_args.beta)
+                rand_index = random_indices(target, nclass=self.args.n_classes)
+
+                target_b = target[rand_index]
+                bbx1, bby1, bbx2, bby2 = rand_bbox(x.size(), lam)
+                x[:, :, bbx1:bbx2, bby1:bby2] = x[rand_index, :, bbx1:bbx2, bby1:bby2]
+                ratio = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (x.size()[-1] * x.size()[-2]))
+
+                output = net(input)
+                loss = criterion(output, target) * ratio + criterion(output, target_b) * (1. - ratio)
+            else:
+                # compute output
+                output = net(input)
+                loss = criterion(output, target)
+
+            optimizer_net.zero_grad()
+            loss.backward()
+            optimizer_net.step()
+
+    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, aug, aug_rand):
 
         optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
         self.appr_args.fix_iter = max(1, self.appr_args.fix_iter)
         query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
                                 dtype=torch.long, requires_grad=False, device=self.args.device)
+        train_dl = DataLoader(train_ds, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                            batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
 
         for it in range(self.appr_args.iter):
             if it % self.appr_args.fix_iter == 0 and it != 0:
@@ -354,7 +385,7 @@ class FedDream(FedDistill):
                     loss.backward()
                     optimizer_img.step()
 
-                train_epoch(net, train_ds, criterion, optimizer_net, aug=aug_rand)
+                self.train_epoch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
 
             if it % 10 == 0:
                 self.logger.info('Iter: %03d loss: %.3f' % (it, loss_total / self.args.n_classes / self.appr_args.inner_loop))
