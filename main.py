@@ -30,6 +30,8 @@ if __name__ == '__main__':
             from Fed.feddistill import FedDistill as alg
         elif args.approach == 'fedgan':
             from Fed.fedgan import FedGAN as alg
+        elif args.approach == 'feddream':
+            from Fed.feddream import FedDream as alg
         else:
             raise NotImplementedError('Approach Not Implemented')
     elif args.mode == 'UpperBound':

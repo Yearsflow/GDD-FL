@@ -58,7 +58,7 @@ def get_dataloader(args, request='dataloader'):
             transforms.Normalize(mean=[0.1307], std=[0.3081])
         ])
 
-        if args.approach in {'feddc', 'feddsa', 'feddm', 'fedgan'}:
+        if args.approach in {'feddc', 'feddsa', 'feddm', 'fedgan', 'feddream'}:
             transform_train = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.1307], std=[0.3081])
