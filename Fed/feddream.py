@@ -64,7 +64,7 @@ class FedDream(FedDistill):
                             help='mixup probability')
         parser.add_argument('--beta', default=1.0, type=float, 
                             help='mixup beta distribution')
-        parser.add_argument('--init', type=str, default='mix', choices=['random', 'noise', 'mix','kmean'],
+        parser.add_argument('--init', type=str, default='kmean', choices=['random', 'noise', 'mix','kmean'],
                             help='condensed data initialization type')
         parser.add_argument('--f2_init', type=str, default='kmean', choices=['random', 'kmean'],
                             help='condensed data initialization type')
@@ -180,9 +180,6 @@ class FedDream(FedDistill):
                 label_syn = torch.tensor(np.array([np.ones(self.appr_args.ipc)*i for i in range(self.args.n_classes)]),
                                         dtype=torch.long, requires_grad=False).view(-1)
                 image_syn.data = torch.clamp(image_syn.data / 4 + 0.5, min=0., max=1.)
-                if self.appr_args.init == 'real':
-                    for c in range(self.args.n_classes):
-                        image_syn.data[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc] = self.get_images(c, self.appr_args.ipc, indices_class, train_ds_c).detach().data
                 
                 if self.args.device != 'cpu':
                     net = nn.DataParallel(local_nets[c_idx])
@@ -190,14 +187,15 @@ class FedDream(FedDistill):
                 net.eval()
                 aug, aug_rand = self.diffaug()
 
-                self.logger.info('KMean initialize synset')
-                for c in range(self.args.n_classes):
-                    indices = indices_class[c][:self.appr_args.ipc]
-                    img = torch.stack([train_ds_c[i][0] for i in indices])
-                    strategy = NEW_Strategy(img, net, self.args.device)
-                    query_idxs = strategy.query(self.appr_args.ipc)
-                    image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img.data.to(self.args.device)
-                
+                if self.appr_args.init == 'kmean':
+                    self.logger.info('KMean initialize synset')
+                    for c in range(self.args.n_classes):
+                        indices = indices_class[c][:self.appr_args.ipc]
+                        img = torch.stack([train_ds_c[i][0] for i in indices])
+                        strategy = NEW_Strategy(img, net, self.args.device)
+                        query_idxs = strategy.query(self.appr_args.ipc)
+                        image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img.data.to(self.args.device)
+
                 save_name = os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'init_client{}_'.format(c_idx)+self.args.log_file_name+'.png')
                 self.save_img(save_name, image_syn.data, unnormalize=False)
 
@@ -358,7 +356,6 @@ class FedDream(FedDistill):
                 x[:, :, bbx1:bbx2, bby1:bby2] = x[rand_index, :, bbx1:bbx2, bby1:bby2]
                 ratio = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (x.size()[-1] * x.size()[-2]))
 
-                print(x.size())
                 output = net(x)
                 loss = criterion(output, target) * ratio + criterion(output, target_b) * (1. - ratio)
             else:
