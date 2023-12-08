@@ -407,13 +407,13 @@ class FedDream(FedDistill):
 
                     indices = indices_class[c]
                     img_c = torch.stack([train_ds[i][0] for i in indices])
+                    print(img_c.device)
 
                     if il % self.appr_args.interval == 0:
                         strategy = NEW_Strategy(img_c, net, self.args.device)
                         query_idxs = strategy.query(self.appr_args.batch_real)
                         query_list[c] = query_idxs
 
-                    img_c = img_c.to(self.args.device)
                     img = img_c[query_list[c]]
                     lab = torch.tensor([np.ones(img.size(0))*c], dtype=torch.long, requires_grad=False, device=self.args.device).view(-1)
                     img_syn, lab_syn = self.sample(c, image_syn, label_syn, max_size=self.appr_args.batch_syn_max)
