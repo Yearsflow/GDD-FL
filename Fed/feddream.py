@@ -139,6 +139,12 @@ class FedDream(FedDistill):
             local_nets = [get_network(self.args) for _ in range(self.args.C)]
         global_net = get_network(self.args)
 
+        self.logger.info('Training begins...')
+        syn_data = {
+            'images': [],
+            'label': []
+        }
+
         for round in range(self.args.n_comm_round):
             self.logger.info('Communication Round: %d' % round)
 
@@ -197,6 +203,33 @@ class FedDream(FedDistill):
 
                 self.logger.info('Condense begins...')
                 best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, aug, aug_rand)
+
+                self.save(best_img_syn, best_lab_syn, c_idx)
+                self.visualize(best_img_syn, c_idx)
+
+                for i in range(len(best_img_syn)):
+                    syn_data['images'].append(best_img_syn[i].detach().cpu())
+                    syn_data['label'].append(best_lab_syn[i].detach().cpu())
+                
+            if self.args.device != 'cpu':
+                global_net = nn.DataParallel(global_net)
+                global_net.to(self.args.device)
+
+            global_w = self.global_train(copy.deepcopy(global_net), syn_data)
+            global_net.load_state_dict(global_w)
+            if (round + 1) % self.args.save_interval == 0 or round == 0:
+                torch.save(global_w,
+                    os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'global_{}_round{}_'.format(self.args.model, round)+self.args.log_file_name+'.pth'))
+            
+            test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, shuffle=False,
+                                num_workers=8, pin_memory=True, prefetch_factor=16*self.args.test_bs)
+            
+            if self.args.dataset not in {'isic2020', 'EyePACS'}:
+                test_acc = self.eval(global_net, test_dl)
+                self.logger.info('>>> Global Model Test Accuracy: %f' % test_acc)
+            else:
+                test_auc = self.eval(global_net, test_dl)
+                self.logger.info('>>> Global Model Test AUC: %f' % test_auc)
 
     def decode_zoom(self, img, target, factor):
         """Uniform multi-formation
@@ -303,12 +336,12 @@ class FedDream(FedDistill):
 
         return loss
     
-    def train_epoch(self, net, train_dl, criterion, optimizer_net, aug, mixup):
+    def train_batch(self, net, train_dl, criterion, optimizer_net, aug, mixup):
 
         net.train()
         for batch_idx, (x, target) in enumerate(train_dl):
-            x = x.to(self.args.device)
-            target = target.long().to(self.args.device)
+            x = x.to(self.args.device, non_blocking=True)
+            target = target.long().to(self.args.device, non_blocking=True)
 
             if aug != None:
                 with torch.no_grad():
@@ -337,10 +370,12 @@ class FedDream(FedDistill):
             loss.backward()
             optimizer_net.step()
 
+            break
+
     def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, aug, aug_rand):
 
         optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
-        self.appr_args.fix_iter = max(50, self.appr_args.fix_iter)
+        self.appr_args.fix_iter = max(100, self.appr_args.fix_iter)
         query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
                                 dtype=torch.long, requires_grad=False, device=self.args.device)
         train_dl = DataLoader(train_ds, num_workers=8, prefetch_factor=16*self.args.train_bs,
@@ -348,6 +383,7 @@ class FedDream(FedDistill):
         optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum, 
                                   weight_decay=self.args.weight_decay)
         criterion = nn.CrossEntropyLoss()
+        best_img_syn, best_lab_syn, best_loss = None, None, 1e8
 
         for it in range(self.appr_args.iter):
             if it % self.appr_args.fix_iter == 0 and it != 0:
@@ -396,8 +432,15 @@ class FedDream(FedDistill):
                     loss.backward()
                     optimizer_img.step()
 
-                self.train_epoch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
+                self.train_batch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
+
+            iter_loss = loss_total / self.args.n_classes / self.appr_args.inner_loop
+            if best_loss > iter_loss:
+                best_loss = iter_loss
+                best_img_syn = copy.deepcopy(image_syn)
+                best_lab_syn = copy.deepcopy(label_syn)
 
             if it % 10 == 0:
                 self.logger.info('Iter: %03d loss: %.3f' % (it, loss_total / self.args.n_classes / self.appr_args.inner_loop))
             
+        return best_img_syn, best_lab_syn

@@ -482,8 +482,8 @@ class FedDistill(FedAvg):
 
         save_name = os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'vis_client{}_'.format(c_id)+self.args.log_file_name+'.png')
         image_syn_vis = copy.deepcopy(best_img_syn.detach().cpu())
-        for ch in range(self.appr_args.channel):
-            image_syn_vis[:, ch] = image_syn_vis[:, ch] * self.appr_args.std[ch] + self.appr_args.mean[ch]
+        for ch in range(self.args.channel):
+            image_syn_vis[:, ch] = image_syn_vis[:, ch] * self.args.std[ch] + self.args.mean[ch]
         image_syn_vis[image_syn_vis < 0] = 0.0
         image_syn_vis[image_syn_vis > 1] = 1.0
         save_image(image_syn_vis, save_name, nrow=self.appr_args.ipc)
