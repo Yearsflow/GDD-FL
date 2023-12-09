@@ -11,7 +11,7 @@ class NEW_Strategy:
         xx = torch.pow(x, 2).sum(1, keepdim=True).expand(m, n)
         yy = torch.pow(y, 2).sum(1, keepdim=True).expand(n, m).t()
         dist = xx + yy
-        dist.addmm_(1, -2, x, y.t())
+        dist.addmm_(x, y.t(), beta=1, alpha=-2)
         dist = dist.clamp(min=1e-12).sqrt()  # for numerical stability
         return dist
 
@@ -30,9 +30,18 @@ class NEW_Strategy:
         return q_idxs
     
     def get_embeddings(self, images):
+        
+        features = []
         embed = self.net.module.embed
-        images = images.to(self.device)
-        with torch.no_grad():
-            features = embed(images).detach()
-        return features
+        print(images[0])
+        for i in range(len(images)):
+            image = images[i].to(self.device)
+            print(self.device)
+            print(image.device)
+            print(image.size())
+            with torch.no_grad():
+                features.append(embed(torch.unsqueeze(image, dim=0)).detach())
+        features = torch.cat(features, dim=0)
+
+        return features.to(self.device)
 

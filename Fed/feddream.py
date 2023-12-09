@@ -374,7 +374,7 @@ class FedDream(FedDistill):
         optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
         self.appr_args.fix_iter = max(100, self.appr_args.fix_iter)
         query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
-                                dtype=torch.long, requires_grad=False, device=self.args.device)
+                                dtype=torch.long, requires_grad=False)
         train_dl = DataLoader(train_ds, num_workers=8, prefetch_factor=16*self.args.train_bs,
                             batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
         optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum, 
@@ -411,10 +411,11 @@ class FedDream(FedDistill):
                     if il % self.appr_args.interval == 0:
                         strategy = NEW_Strategy(img_c, net, self.args.device)
                         query_idxs = strategy.query(self.appr_args.batch_real)
+                        query_idxs.to('cpu')
                         query_list[c] = query_idxs
 
-                    img_c = img_c.to(self.args.device)
                     img = img_c[query_list[c]]
+                    img = img.to(self.args.device)
                     lab = torch.tensor([np.ones(img.size(0))*c], dtype=torch.long, requires_grad=False, device=self.args.device).view(-1)
                     img_syn, lab_syn = self.sample(c, image_syn, label_syn, max_size=self.appr_args.batch_syn_max)
                     n = img.shape[0]
