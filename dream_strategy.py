@@ -19,7 +19,7 @@ class NEW_Strategy:
 
         embeddings = self.get_embeddings(self.images)
 
-        index = torch.arange(len(embeddings), device=self.device)
+        index = torch.arange(len(embeddings))
 
         kmeans = KMeans(n_clusters=n, mode='euclidean')
         labels = kmeans.fit_predict(embeddings)

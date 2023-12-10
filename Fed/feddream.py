@@ -407,6 +407,7 @@ class FedDream(FedDistill):
 
                     indices = indices_class[c]
                     img_c = torch.stack([train_ds[i][0] for i in indices])
+                    print(img_c.device)
 
                     if il % self.appr_args.interval == 0:
                         strategy = NEW_Strategy(img_c, net, self.args.device)
