@@ -4,18 +4,14 @@ import torch.nn as nn
 import torch.optim as optim
 import argparse
 import numpy as np
-from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 import copy
 import random
 from .feddistill import FedDistill
-from dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
 from utils import get_dataloader, DatasetSplit, get_network, get_loops
-from networks import Generator, Discriminator
-from torch.autograd import Variable
-from dream_utils import Normalize, random_indices, rand_bbox
+from dream_utils import Normalize, random_indices, rand_bbox, ClassDataLoader, ClassMemDataLoader
 from dream_augment import DiffAug
 from torchvision import transforms
 from dream_strategy import NEW_Strategy
@@ -70,6 +66,10 @@ class FedDream(FedDistill):
                             help='condensed data initialization type')
         parser.add_argument('--batch_syn_max', type=int, default=64,
                             help='maximum number of synthetic data used for each matching (random sampling for large synthetic data)')
+        parser.add_argument('--subsample', type=int, default=1,
+                            help='subcluster sample number')
+        parser.add_argument('--n_data', type=int, default=500,
+                            help='number of samples for training network at each inner loop')
 
         return parser.parse_args(extra_args)
     
@@ -155,21 +155,25 @@ class FedDream(FedDistill):
             for c_idx in party_list_this_round:
                 self.logger.info('Client %d' % c_idx)
 
-                train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][c_idx])
+                labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][c_idx]]
+
+                train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][c_idx], targets=labels_all)
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][c_idx])
 
-                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,
-                                    batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
+                train_dl = ClassMemDataLoader(train_ds_c, batch_size=self.args.train_bs, device=self.args.device, dst_name=self.args.dataset)
                 val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=16*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 self.logger.info('Train batches: %d' % len(train_dl))
                 self.logger.info('Val batches: %d' % len(val_dl))
 
                 self.logger.info('Organize the real dataset')
-                labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][c_idx]]
                 indices_class = [[] for _ in range(self.args.n_classes)]
                 for _, lab in enumerate(labels_all):
                     indices_class[lab].append(_)
+                img_class = []
+                for i in range(self.args.n_classes):
+                    img, lab = train_dl.class_sample(i, len(indices_class[i]))
+                    img_class.append(img)
 
                 for _ in range(self.args.n_classes):
                     self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
@@ -184,23 +188,26 @@ class FedDream(FedDistill):
                 if self.args.device != 'cpu':
                     net = nn.DataParallel(local_nets[c_idx])
                     net.to(self.args.device)
-                net.eval()
+                net.train()
+                optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum,
+                                          weight_decay=self.args.weight_decay)
+                criterion = nn.CrossEntropyLoss()
                 aug, aug_rand = self.diffaug()
+                self.train_epoch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
 
                 if self.appr_args.init == 'kmean':
                     self.logger.info('KMean initialize synset')
                     for c in range(self.args.n_classes):
-                        indices = indices_class[c][:self.appr_args.ipc]
-                        img = torch.stack([train_ds_c[i][0] for i in indices])
-                        strategy = NEW_Strategy(img, net, self.args.device)
+                        img, lab = train_dl.class_sample(c, len(indices_class[c]))
+                        strategy = NEW_Strategy(img, net)
                         query_idxs = strategy.query(self.appr_args.ipc)
-                        image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img.data.to(self.args.device)
+                        image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img[query_idxs].detach().data
 
                 save_name = os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'init_client{}_'.format(c_idx)+self.args.log_file_name+'.png')
                 self.save_img(save_name, image_syn.data, unnormalize=False)
 
                 self.logger.info('Condense begins...')
-                best_img_syn, best_lab_syn = self.DREAM(net, indices_class, image_syn, label_syn, train_ds_c, aug, aug_rand)
+                best_img_syn, best_lab_syn = self.DREAM(net, optimizer_net, criterion, img_class, image_syn, label_syn, train_dl, aug, aug_rand)
 
                 self.save(best_img_syn, best_lab_syn, c_idx)
                 self.visualize(best_img_syn, c_idx)
@@ -315,14 +322,18 @@ class FedDream(FedDistill):
 
         output_real = model(img_real)
         loss_real = criterion(output_real, lab_real)
-        g_real = torch.autograd.grad(loss_real, model.parameters())
+        g_real = torch.autograd.grad(loss_real, model.parameters(), retain_graph=True)
         g_real = list((g.detach() for g in g_real))
 
         output_syn = model(img_syn)
         loss_syn = criterion(output_syn, lab_syn)
         g_syn = torch.autograd.grad(loss_syn, model.parameters(), create_graph=True)
 
+        feature_real = model.module.embed(img_real)
+        feature_syn = model.module.embed(img_syn)
+
         loss = None
+        loss = self.add_loss(loss, self.dist(feature_real.mean(0), feature_syn.mean(0), method=self.appr_args.metric))
 
         for i in range(len(g_real)):
             if (len(g_real[i].shape) == 1) and not self.appr_args.bias:  # bias, normliazation
@@ -334,9 +345,11 @@ class FedDream(FedDistill):
 
         return loss
     
-    def train_batch(self, net, train_dl, criterion, optimizer_net, aug, mixup):
+    def train_epoch(self, net, train_dl, criterion, optimizer_net, aug=None, mixup='vanilla', n_data=-1):
 
         net.train()
+        num_exp = 0
+
         for batch_idx, (x, target) in enumerate(train_dl):
             x = x.to(self.args.device, non_blocking=True)
             target = target.long().to(self.args.device, non_blocking=True)
@@ -367,19 +380,15 @@ class FedDream(FedDistill):
             loss.backward()
             optimizer_net.step()
 
-            break
+            num_exp += len(target)
+            if n_data > 0 and num_exp >= n_data:
+                break
 
-    def DREAM(self, net, indices_class, image_syn, label_syn, train_ds, aug, aug_rand):
+    def DREAM(self, net, optimizer_net, criterion, img_class, image_syn, label_syn, train_dl, aug, aug_rand):
 
         optimizer_img = optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=self.appr_args.mom_img)
-        self.appr_args.fix_iter = max(100, self.appr_args.fix_iter)
-        query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)),
-                                dtype=torch.long, requires_grad=False)
-        train_dl = DataLoader(train_ds, num_workers=8, prefetch_factor=16*self.args.train_bs,
-                            batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-        optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum, 
-                                  weight_decay=self.args.weight_decay)
-        criterion = nn.CrossEntropyLoss()
+        self.appr_args.fix_iter = max(1, self.appr_args.fix_iter)
+        query_list = torch.tensor(np.ones(shape=(self.args.n_classes, self.appr_args.batch_real)), dtype=torch.long, requires_grad=False, device=self.args.device)
         best_img_syn, best_lab_syn, best_loss = None, None, 1e8
 
         for it in range(self.appr_args.iter):
@@ -396,8 +405,10 @@ class FedDream(FedDistill):
                     net.to(self.args.device)
                 net.train()
                 optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr, momentum=self.args.momentum, 
-                                            weight_decay=self.args.weight_decay)
+                                        weight_decay=self.args.weight_decay)
                 criterion = nn.CrossEntropyLoss()
+
+                self.train_epoch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
 
             loss_total = 0
             image_syn.data = torch.clamp(image_syn.data, min=0., max=1.)
@@ -405,18 +416,13 @@ class FedDream(FedDistill):
             for il in range(self.appr_args.inner_loop):
                 for c in range(self.args.n_classes):
 
-                    indices = indices_class[c]
-                    img_c = torch.stack([train_ds[i][0] for i in indices])
-                    print(img_c.device)
-
                     if il % self.appr_args.interval == 0:
-                        strategy = NEW_Strategy(img_c, net, self.args.device)
-                        query_idxs = strategy.query(self.appr_args.batch_real)
-                        query_idxs.to('cpu')
+                        img = img_class[c]
+                        strategy = NEW_Strategy(img, net)
+                        query_idxs = strategy.query_match(self.appr_args.batch_real, self.appr_args.subsample)
                         query_list[c] = query_idxs
 
-                    img = img_c[query_list[c]]
-                    img = img.to(self.args.device)
+                    img = img_class[c][query_list[c]]
                     lab = torch.tensor([np.ones(img.size(0))*c], dtype=torch.long, requires_grad=False, device=self.args.device).view(-1)
                     img_syn, lab_syn = self.sample(c, image_syn, label_syn, max_size=self.appr_args.batch_syn_max)
                     n = img.shape[0]
@@ -431,7 +437,8 @@ class FedDream(FedDistill):
                     loss.backward()
                     optimizer_img.step()
 
-                self.train_batch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net)
+                if self.appr_args.n_data > 0:
+                    self.train_epoch(net, train_dl, criterion, optimizer_net, aug=aug_rand, mixup=self.appr_args.mixup_net, n_data=self.appr_args.n_data)
 
             iter_loss = loss_total / self.args.n_classes / self.appr_args.inner_loop
             if best_loss > iter_loss:
