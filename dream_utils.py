@@ -7,11 +7,179 @@ import os
 import time
 import matplotlib
 import matplotlib.pyplot as plt
+from torchvision import transforms
 
 matplotlib.use('Agg')
 
 __all__ = ["Compose", "Lighting", "ColorJitter"]
 
+class _RepeatSampler(object):
+    """ Sampler that repeats forever.
+    Args:
+        sampler (Sampler)
+    """
+    def __init__(self, sampler):
+        self.sampler = sampler
+
+    def __iter__(self):
+        while True:
+            yield from iter(self.sampler)
+
+    def __len__(self):
+        return len(self.sampler)
+
+class ClassBatchSampler(object):
+    """Intra-class batch sampler 
+    """
+    def __init__(self, cls_idx, batch_size, drop_last=True):
+        self.samplers = []
+        for indices in cls_idx:
+            n_ex = len(indices)
+            sampler = torch.utils.data.SubsetRandomSampler(indices)
+            batch_sampler = torch.utils.data.BatchSampler(sampler,
+                                                          batch_size=min(n_ex, batch_size),
+                                                          drop_last=drop_last)
+            self.samplers.append(iter(_RepeatSampler(batch_sampler)))
+
+    def __iter__(self):
+        while True:
+            for sampler in self.samplers:
+                yield next(sampler)
+
+    def __len__(self):
+        return len(self.samplers)
+
+class MultiEpochsDataLoader(torch.utils.data.DataLoader):
+    """Multi epochs data loader
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._DataLoader__initialized = False
+        self.batch_sampler = _RepeatSampler(self.batch_sampler)
+        self._DataLoader__initialized = True
+        self.iterator = super().__iter__()  # Init iterator and sampler once
+
+        self.convert = None
+        if self.dataset[0][0].dtype == torch.uint8:
+            self.convert = transforms.ConvertImageDtype(torch.float)
+
+        if self.dataset[0][0].device == torch.device('cpu'):
+            self.device = 'cpu'
+        else:
+            self.device = 'cuda'
+
+    def __len__(self):
+        return len(self.batch_sampler)
+
+    def __iter__(self):
+        for i in range(len(self)):
+            data, target = next(self.iterator)
+            if self.convert != None:
+                data = self.convert(data)
+            yield data, target
+
+
+class ClassDataLoader(MultiEpochsDataLoader):
+    """Basic class loader (might be slow for processing data)
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.nclass = self.dataset.nclass
+        self.cls_idx = [[] for _ in range(self.nclass)]
+        for i in range(len(self.dataset)):
+            self.cls_idx[self.dataset.targets[i]].append(i)
+        self.class_sampler = ClassBatchSampler(self.cls_idx, self.batch_size, drop_last=True)
+
+        self.cls_targets = torch.tensor([np.ones(self.batch_size) * c for c in range(self.nclass)],
+                                        dtype=torch.long,
+                                        requires_grad=False,
+                                        device='cuda')
+
+    def class_sample(self, c, ipc=-1):
+        if ipc > 0:
+            indices = self.cls_idx[c][:ipc]
+        else:
+            indices = next(self.class_sampler.samplers[c])
+
+        data = torch.stack([self.dataset[i][0] for i in indices])
+        target = torch.tensor([self.dataset.targets[i] for i in indices])
+        return data.cuda(), target.cuda()
+
+    def sample(self):
+        data, target = next(self.iterator)
+        if self.convert != None:
+            data = self.convert(data)
+
+        return data.cuda(), target.cuda()
+
+
+class ClassMemDataLoader():
+    """Class loader with data on GPUs
+    """
+    def __init__(self, dataset, batch_size, drop_last=False, device='cuda', dst_name='mnist'):
+        self.device = device
+        self.batch_size = batch_size
+
+        self.dataset = dataset
+        self.data = [d[0].to(device) for d in dataset]  # uint8 data
+        self.targets = torch.tensor(dataset.targets, dtype=torch.long, device=device)
+
+        sampler = torch.utils.data.SubsetRandomSampler([i for i in range(len(dataset))])
+        self.batch_sampler = torch.utils.data.BatchSampler(sampler,
+                                                           batch_size=batch_size,
+                                                           drop_last=drop_last)
+        self.iterator = iter(_RepeatSampler(self.batch_sampler))
+
+        if dst_name in ['mnist', 'cifar10']:
+            self.nclass = 10
+        elif dst_name == 'isic2020':
+            self.nclass = 2
+        elif dst_name == 'EyePACS':
+            self.nclass = 5
+        self.cls_idx = [[] for _ in range(self.nclass)]
+        for i in range(len(dataset)):
+            self.cls_idx[self.targets[i]].append(i)
+        self.class_sampler = ClassBatchSampler(self.cls_idx, self.batch_size, drop_last=True)
+        self.cls_targets = torch.tensor([np.ones(batch_size) * c for c in range(self.nclass)],
+                                        dtype=torch.long,
+                                        requires_grad=False,
+                                        device=self.device)
+
+        self.convert = None
+        if self.data[0].dtype == torch.uint8:
+            self.convert = transforms.ConvertImageDtype(torch.float)
+
+    def class_sample(self, c, ipc=-1):
+        if ipc > 0:
+            indices = self.cls_idx[c][:ipc]
+        else:
+            indices = next(self.class_sampler.samplers[c])
+
+        data = torch.stack([self.data[i] for i in indices])
+        # print("self.convert:",self.convert)
+        if self.convert != None:
+            data = self.convert(data)
+
+        # print(self.targets[indices])
+        return data, self.cls_targets[c]
+
+    def sample(self):
+        indices = next(self.iterator)
+        data = torch.stack([self.data[i] for i in indices])
+        if self.convert != None:
+            data = self.convert(data)
+        target = self.targets[indices]
+
+        return data, target
+
+    def __len__(self):
+        return len(self.batch_sampler)
+
+    def __iter__(self):
+        for _ in range(len(self)):
+            data, target = self.sample()
+            yield data, target
 
 def dist_l2(data, target):
     dist = (data**2).sum(-1).unsqueeze(1) + (
