@@ -63,6 +63,7 @@ class Ours(FedDistill):
             for client_idx in party_list_this_round:
 
                 self.logger.info('Client %d' % client_idx)
+                
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][client_idx])
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][client_idx])
                 train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,

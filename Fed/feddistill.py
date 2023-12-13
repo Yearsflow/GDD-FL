@@ -441,6 +441,9 @@ class FedDistill(FedAvg):
             loss = torch.tensor(0.0).to(self.args.device)
             for c in range(self.args.n_classes):
 
+                if len(indices_class[c]) == 0:
+                    continue
+
                 img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
                 img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.appr_args.channel, self.appr_args.im_size[0], self.appr_args.im_size[1]))
 
