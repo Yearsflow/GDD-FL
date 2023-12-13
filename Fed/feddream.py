@@ -199,7 +199,7 @@ class FedDream(FedDistill):
                     self.logger.info('KMean initialize synset')
                     for c in range(self.args.n_classes):
                         img, lab = train_dl.class_sample(c, len(indices_class[c]))
-                        strategy = NEW_Strategy(img, net)
+                        strategy = NEW_Strategy(img, net, self.args.dataset)
                         query_idxs = strategy.query(self.appr_args.ipc)
                         image_syn.data[c * self.appr_args.ipc: (c+1) * self.appr_args.ipc] = img[query_idxs].detach().data
 
@@ -329,8 +329,9 @@ class FedDream(FedDistill):
         loss_syn = criterion(output_syn, lab_syn)
         g_syn = torch.autograd.grad(loss_syn, model.parameters(), create_graph=True)
 
-        feature_real = model.module.embed(img_real)
-        feature_syn = model.module.embed(img_syn)
+        strategy = NEW_Strategy(img_real, model, self.args.dataset)
+        feature_real = strategy.get_embeddings(img_real)
+        feature_syn = strategy.get_embeddings(img_syn)
 
         loss = None
         loss = self.add_loss(loss, self.dist(feature_real.mean(0), feature_syn.mean(0), method=self.appr_args.metric))
@@ -418,7 +419,7 @@ class FedDream(FedDistill):
 
                     if il % self.appr_args.interval == 0:
                         img = img_class[c]
-                        strategy = NEW_Strategy(img, net)
+                        strategy = NEW_Strategy(img, net, self.args.dataset)
                         query_idxs = strategy.query_match(self.appr_args.batch_real, self.appr_args.subsample)
                         query_list[c] = query_idxs
 

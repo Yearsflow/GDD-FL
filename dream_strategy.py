@@ -1,9 +1,10 @@
 import torch
 from fast_pytorch_kmeans import KMeans
 class NEW_Strategy:
-    def __init__(self, images, net):
+    def __init__(self, images, net, dataset):
         self.images = images
         self.net = net
+        self.dataset = dataset
 
     def euclidean_dist(self,x, y):
         m, n = x.size(0), y.size(0)
@@ -58,8 +59,23 @@ class NEW_Strategy:
         return min_distance_index
     
     def get_embeddings(self, images):
-        embed=self.net.module.embed
-        with torch.no_grad():
-            features = embed(images).detach()
+
+        if self.dataset in ['mnist', 'cifar10']:
+            embed = self.net.module.embed
+            with torch.no_grad():
+                features = embed(images).detach()
+        else:
+            embed = self.net.module.embed
+            features = []
+            batch_size = 50
+            batch_idx = 0
+            with torch.no_grad():
+                while True:
+                    if batch_idx * batch_size >= len(images):
+                        break
+                    features.append(embed(images[batch_idx * batch_size: min((batch_idx + 1) * batch_size, len(images))]).detach())
+                    print(batch_idx)
+                    batch_idx += 1
+            features = torch.cat(features, dim=0)
         return features
 
