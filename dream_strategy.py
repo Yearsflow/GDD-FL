@@ -67,14 +67,13 @@ class NEW_Strategy:
         else:
             embed = self.net.module.embed
             features = []
-            batch_size = 50
+            batch_size = 64
             batch_idx = 0
             with torch.no_grad():
                 while True:
                     if batch_idx * batch_size >= len(images):
                         break
                     features.append(embed(images[batch_idx * batch_size: min((batch_idx + 1) * batch_size, len(images))]).detach())
-                    print(batch_idx)
                     batch_idx += 1
             features = torch.cat(features, dim=0)
         return features

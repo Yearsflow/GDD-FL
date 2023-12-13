@@ -25,7 +25,7 @@ class FedDistill(FedAvg):
 
         parser.add_argument('--ipc', type=int, default=1,
                             help='number of images distilled per class')
-        parser.add_argument('--lr_img', type=float, default=0.1, 
+        parser.add_argument('--lr_img', type=float, default=1.0, 
                             help='learning rate for updating synthetic images')
         parser.add_argument('--iter', type=int, default=300,
                             help='distilling iterations')
@@ -35,7 +35,7 @@ class FedDistill(FedAvg):
                             help='distance metric, especially for DC or DSA method')
         parser.add_argument('--dsa_strategy', type=str, default='color_crop_cutout_flip_scale_rotate', 
                             help='differentiable Siamese augmentation strategy')
-        parser.add_argument('--init', type=str, default='real', 
+        parser.add_argument('--init', type=str, default='noise', 
                             help='noise/real: initialize synthetic images from random noise or randomly sampled real images.')
 
         return parser.parse_args(extra_args)
