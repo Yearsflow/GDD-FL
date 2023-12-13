@@ -156,7 +156,10 @@ class FedDream(FedDistill):
                 self.logger.info('Client %d' % c_idx)
 
                 labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][c_idx]]
-
+                indices_class = [[] for _ in range(self.args.n_classes)]
+                for _, lab in enumerate(labels_all):
+                    indices_class[lab].append(_)
+                
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][c_idx], targets=labels_all)
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][c_idx])
 
@@ -167,11 +170,12 @@ class FedDream(FedDistill):
                 self.logger.info('Val batches: %d' % len(val_dl))
 
                 self.logger.info('Organize the real dataset')
-                indices_class = [[] for _ in range(self.args.n_classes)]
-                for _, lab in enumerate(labels_all):
-                    indices_class[lab].append(_)
+                
                 img_class = []
                 for i in range(self.args.n_classes):
+                    if len(indices_class[i]) == 0:
+                        img_class.append([])
+                        continue
                     img, lab = train_dl.class_sample(i, len(indices_class[i]))
                     img_class.append(img)
 
@@ -198,6 +202,8 @@ class FedDream(FedDistill):
                 if self.appr_args.init == 'kmean':
                     self.logger.info('KMean initialize synset')
                     for c in range(self.args.n_classes):
+                        if len(indices_class[c]) == 0:
+                            continue
                         img, lab = train_dl.class_sample(c, len(indices_class[c]))
                         strategy = NEW_Strategy(img, net)
                         query_idxs = strategy.query(self.appr_args.ipc)
@@ -416,6 +422,9 @@ class FedDream(FedDistill):
             
             for il in range(self.appr_args.inner_loop):
                 for c in range(self.args.n_classes):
+
+                    if len(img_class[c]) == 0:
+                        continue
 
                     if il % self.appr_args.interval == 0:
                         img = img_class[c]

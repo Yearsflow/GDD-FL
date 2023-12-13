@@ -35,6 +35,8 @@ class ClassBatchSampler(object):
         self.samplers = []
         for indices in cls_idx:
             n_ex = len(indices)
+            if n_ex == 0:
+                continue
             sampler = torch.utils.data.SubsetRandomSampler(indices)
             batch_sampler = torch.utils.data.BatchSampler(sampler,
                                                           batch_size=min(n_ex, batch_size),
