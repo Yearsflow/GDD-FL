@@ -12,8 +12,7 @@ from .feddistill import FedDistill
 from dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, get_loops
-from torch.autograd import Variable
+from utils import get_dataloader, DatasetSplit, get_network
 from torchvision import transforms
 
 class Ours(FedDistill):
@@ -66,11 +65,22 @@ class Ours(FedDistill):
                 
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][client_idx])
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][client_idx])
-                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=2*self.args.train_bs,
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=16*self.args.test_bs,
+                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=2*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 self.logger.info('Train batches: %d' % len(train_dl))
                 self.logger.info('Val batches: %d' % len(val_dl))
 
+                if self.args.device != 'cpu':
+                    local_nets[client_idx] = nn.DataParallel(local_nets[client_idx])
+                    local_nets[client_idx].to(self.args.device)
                 
+                self.logger.info('Organize the real dataset')
+                labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][client_idx]]
+                indices_class = [[] for _ in range(self.args.n_classes)]
+                for _, lab in enumerate(labels_all):
+                    indices_class[lab].append(_)
+
+                for _ in range(self.args.n_classes):
+                    self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))

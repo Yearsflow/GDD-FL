@@ -320,7 +320,7 @@ class FedDistill(FedAvg):
         images = []
         for idx in idx_shuffle:
             images.append(torch.unsqueeze(train_ds[idx][0], dim=0))
-        return torch.cat(images, dim=0).to(self.args.device)
+        return torch.cat(images, dim=0).to(self.args.device, non_blocking=True)
 
     def DC(self, net, indices_class, image_syn, label_syn, train_ds, val_ds):
 
@@ -361,6 +361,10 @@ class FedDistill(FedAvg):
                 ''' update synthetic data '''
                 loss = torch.tensor(0.0).to(self.args.device)
                 for c in range(self.args.n_classes):
+
+                    if len(indices_class[c]) == 0:
+                        continue
+
                     img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
                     lab_real = torch.ones((img_real.shape[0],), device=self.args.device, dtype=torch.long) * c
                     img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.appr_args.channel, self.appr_args.im_size[0], self.appr_args.im_size[1]))
@@ -393,9 +397,9 @@ class FedDistill(FedAvg):
                 ''' update network '''
                 image_syn_train, label_syn_train = image_syn.detach(), label_syn.detach()
                 dst_syn_train = TensorDataset(image_syn_train, label_syn_train)
-                trainloader = DataLoader(dst_syn_train, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                trainloader = DataLoader(dst_syn_train, num_workers=8, prefetch_factor=2*self.args.train_bs,
                                         batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                valloader = DataLoader(val_ds, num_workers=8, prefetch_factor=16*self.args.test_bs,
+                valloader = DataLoader(val_ds, num_workers=8, prefetch_factor=2*self.args.test_bs,
                                        batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 for il in range(self.appr_args.inner_loop):
                     if self.args.dataset in {'isic2020', 'EyePACS'}:
@@ -453,7 +457,7 @@ class FedDistill(FedAvg):
                     img_syn = DiffAugment(img_syn, self.appr_args.dsa_strategy, seed=seed, param=self.appr_args.dsa_param)
 
                 output_real = embed(img_real).detach()
-                img_syn = img_syn.to(self.args.device)
+                img_syn = img_syn.to(self.args.device, non_blocking=True)
                 output_syn = embed(img_syn)
 
                 loss += torch.sum((torch.mean(output_real, dim=0) - torch.mean(output_syn, dim=0)) ** 2)
