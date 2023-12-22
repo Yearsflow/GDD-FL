@@ -60,7 +60,7 @@ class FedDream(FedDistill):
                             help='mixup probability')
         parser.add_argument('--beta', default=1.0, type=float, 
                             help='mixup beta distribution')
-        parser.add_argument('--init', type=str, default='kmean', choices=['random', 'noise', 'mix','kmean'],
+        parser.add_argument('--init', type=str, default='noise', choices=['random', 'noise', 'mix','kmean'],
                             help='condensed data initialization type')
         parser.add_argument('--f2_init', type=str, default='kmean', choices=['random', 'kmean'],
                             help='condensed data initialization type')
