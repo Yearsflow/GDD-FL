@@ -11,7 +11,7 @@ import random
 from .feddistill import FedDistill
 from dataset_utils import TensorDataset
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment
+from utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug
 
 class Ours(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -34,12 +34,26 @@ class Ours(FedDistill):
                             help='momentum for optimizing aug data')
         parser.add_argument('--wd_aug', type=float, default=1e-5,
                             help='weight decay for optimizing aug data')
-        parser.add_argument('--lr_center', type=float, default=0.5,
+        parser.add_argument('--lr_center', type=float, default=1.0,
                             help='learning rate for optimizing class center')
         parser.add_argument('--mom_center', type=float, default=0.9,
                             help='momentum for optimizing class center')
         parser.add_argument('--wd_center', type=float, default=1e-5,
                             help='weight decay for optimizing class center')
+        parser.add_argument('--ipc', type=int, default=1,
+                            help='number of images distilled per class')
+        parser.add_argument('--lr_img', type=float, default=1.0, 
+                            help='learning rate for updating synthetic images')
+        parser.add_argument('--iter', type=int, default=300,
+                            help='distilling iterations')
+        parser.add_argument('--batch_real', type=int, default=64, 
+                            help='batch size for real data')
+        parser.add_argument('--dis_metric', type=str, default='ours', 
+                            help='distance metric, especially for DC or DSA method')
+        parser.add_argument('--dsa_strategy', type=str, default='color_crop_cutout_flip_scale_rotate', 
+                            help='differentiable Siamese augmentation strategy')
+        parser.add_argument('--aug_bs', type=int, default=64,
+                            help='batch size for augmentation data')
 
         return parser.parse_args(extra_args)
     
@@ -47,6 +61,8 @@ class Ours(FedDistill):
 
         if self.args.partition == 'noniid':
             self.appr_args.init = 'noise'
+        self.appr_args.dsa_param = ParamDiffAug()
+        self.appr_args.dsa = False if self.appr_args.dsa_strategy in ['none', 'None'] else True
 
         self.logger.info('Partitioning data...')
         
@@ -106,8 +122,8 @@ class Ours(FedDistill):
                     self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
 
                 self.logger.info('Initialize synthetic data')
-                image_syn = torch.randn(size=(self.args.n_classes * self.appr_args.ipc, self.appr_args.channel, 
-                                        self.appr_args.im_size[0], self.appr_args.im_size[1]), dtype=torch.float, requires_grad=True)
+                image_syn = torch.randn(size=(self.args.n_classes * self.appr_args.ipc, self.args.channel, 
+                                        self.args.im_size[0], self.args.im_size[1]), dtype=torch.float, requires_grad=True)
                 label_syn = torch.tensor(np.array([np.ones(self.appr_args.ipc)*i for i in range(self.args.n_classes)]),
                                         dtype=torch.long, requires_grad=False).view(-1)
                 if self.appr_args.init == 'real':
@@ -166,7 +182,7 @@ class Ours(FedDistill):
                 y_vec.append(y[i].reshape((-1)))
             x_vec = torch.cat(x_vec, dim=0)
             y_vec = torch.cat(y_vec, dim=0)
-            dis = torch.sum(x_vec * y_vec, dim=-1) / (torch.norm(x_vec, dim=-1) * torch.norm(y_vec, dim=-1) + 0.000001)
+            dis = torch.sum(x_vec * y_vec) / (torch.norm(x_vec) * torch.norm(y_vec) + 0.000001)
             dis = torch.arccos(dis) / torch.pi
 
         return dis
@@ -183,14 +199,14 @@ class Ours(FedDistill):
         best_metric = 0
         best_img_syn, best_lab_syn = None, None
 
-        class_centers = [torch.randn(size=(self.args.channel, self.args.im_size[0], self.args.im_size[1]), dtype=torch.float, 
-                        requires_grad=True) for _ in range(self.args.n_classes)]
-        class_centers = torch.cat(class_centers, dim=0).to(self.args.device)
+        class_centers = torch.randn(size=(self.args.n_classes, self.args.channel, self.args.im_size[0], self.args.im_size[1]), 
+                                    dtype=torch.float, requires_grad=True, device=self.args.device)
         aug_data = {
             'images': [],
             'label': []
         }
         aug_dst = None
+        aug_indices_class = [[] for _ in range(self.args.n_classes)]
 
         for it in range(self.appr_args.iter):
 
@@ -214,12 +230,42 @@ class Ours(FedDistill):
 
             ''' CADA Domain Generalization '''
             if it % self.appr_args.aug_iter == 0:
-                loss_exp = torch.tensor(0.0).to(self.args.device)
+
+                if len(aug_data['images']) > 0:
+                    aug_dst_tmp = TensorDataset(torch.stack(aug_data['images'], dim=0), torch.stack(aug_data['label'], dim=0))
+                    aug_dl = DataLoader(aug_dst_tmp, num_workers=8, prefetch_factor=2*self.appr_args.aug_bs,
+                                        batch_size=self.appr_args.aug_bs, shuffle=True, drop_last=False, pin_memory=True)
+                    for batch_idx, (x, target) in enumerate(aug_dl):
+                        x_aug = copy.deepcopy(x)
+                        x = x.to(self.args.device, non_blocking=True)
+                        x_aug = x_aug.to(self.args.device, non_blocking=True)
+                        optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
+                                                weight_decay=self.appr_args.wd_aug)
+                        for t in range(self.appr_args.aug_step):
+                            loss_exp = torch.tensor(0.0).to(self.args.device)
+                            loss_exp += self.compute_loss(x_aug, x, 'mse')
+                            loss_ac = torch.tensor(0.0).to(self.args.device)
+                            for i in range(len(x)):
+                                loss_ac += self.compute_loss(x_aug[i], class_centers[target[i]], 'ac')
+                            loss_ac = loss_ac / len(x)
+                            loss_exp -= loss_ac
+
+                            optimizer_aug.zero_grad()
+                            loss_exp.backward()
+                            optimizer_aug.step()
+                    for i in range(len(x_aug)):
+                        aug_data['images'].append(x_aug[i].detach().cpu())
+                        aug_data['label'].append(target[i].detach().cpu())
+                        aug_indices_class[target[i]].append(len(aug_data['label'])-1)
+
                 for batch_idx, (x, target) in enumerate(train_dl):
                     x_aug = copy.deepcopy(x)
+                    x = x.to(self.args.device, non_blocking=True)
+                    x_aug = x_aug.to(self.args.device, non_blocking=True)
                     optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
                                               weight_decay=self.appr_args.wd_aug)
                     for t in range(self.appr_args.aug_step):
+                        loss_exp = torch.tensor(0.0).to(self.args.device)
                         loss_exp += self.compute_loss(x_aug, x, 'mse')
                         loss_ac = torch.tensor(0.0).to(self.args.device)
                         for i in range(len(x)):
@@ -233,7 +279,8 @@ class Ours(FedDistill):
                 for i in range(len(x_aug)):
                     aug_data['images'].append(x_aug[i].detach().cpu())
                     aug_data['label'].append(target[i].detach().cpu())
-                aug_dst = TensorDataset(aug_data['images'], aug_data['label'])
+                    aug_indices_class[target[i]].append(len(aug_data['label'])-1)
+                aug_dst = TensorDataset(torch.stack(aug_data['images'], dim=0), torch.stack(aug_data['label'], dim=0))
 
             ''' Update Synthetic Data '''
             loss = torch.tensor(0.0).to(self.args.device)
@@ -241,13 +288,13 @@ class Ours(FedDistill):
                 if len(indices_class[c]) == 0:
                     continue
 
-                if len(aug_dst) > 0:
-                    img_real = self.get_images(c, self.appr_args.batch_real, indices_class, aug_dst)
+                if len(aug_indices_class[c]) > 0:
+                    img_real = self.get_images(c, self.appr_args.batch_real, aug_indices_class, aug_dst)
                 else:
                     img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
-                lab_real = torch.ones((img_real.shape[0],), device=self.args.device, dtype=torch.long) * c
-                img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.appr_args.channel, self.appr_args.im_size[0], self.appr_args.im_size[1]))
-                lab_syn = torch.ones((self.appr_args.ipc,), device=self.args.device, dtype=torch.long) * c
+                lab_real = torch.ones((img_real.shape[0], ), device=self.args.device, dtype=torch.long) * c
+                img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.args.channel, self.args.im_size[0], self.args.im_size[1]))
+                lab_syn = torch.ones((self.appr_args.ipc, ), device=self.args.device, dtype=torch.long) * c
 
                 if self.appr_args.dsa:
                     seed = 42
@@ -276,16 +323,16 @@ class Ours(FedDistill):
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
             
             if self.args.dataset in ['isic2020', 'EyePACS']:
-                epoch_train_loss, epoch_train_auc = self.epoch('train', trainloader, net, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
-                epoch_val_loss, epoch_val_auc = self.epoch('val', val_dl, net, optimizer_net, criterion, aug=False)
+                epoch_train_loss, epoch_train_auc = self.epoch('train', trainloader, net, optimizer_net, criterion, class_centers, aug=True if self.appr_args.dsa else False)
+                epoch_val_loss, epoch_val_auc = self.epoch('val', val_dl, net, optimizer_net, criterion, class_centers, aug=False)
                 self.logger.info('Iter: %d Synthetic Train loss: %f Train AUC: %f Val loss: %f Val AUC: %f' % (it, epoch_train_loss, epoch_train_auc, epoch_val_loss, epoch_val_auc))
                 if epoch_val_auc > best_metric:
                     best_metric = epoch_val_auc
                     best_img_syn = image_syn
                     best_lab_syn = label_syn
             else:
-                epoch_train_loss, epoch_train_acc = self.epoch('train', trainloader, net, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
-                epoch_val_loss, epoch_val_acc = self.epoch('val', val_dl, net, optimizer_net, criterion, aug=False)
+                epoch_train_loss, epoch_train_acc = self.epoch('aug_train', trainloader, net, optimizer_net, criterion, class_centers, aug=True if self.appr_args.dsa else False)
+                epoch_val_loss, epoch_val_acc = self.epoch('val', val_dl, net, optimizer_net, criterion, class_centers, aug=False)
                 self.logger.info('Iter: %d Synthetic Train loss: %f Train Acc: %f Val loss: %f Val Acc: %f' % (it, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc))
                 if epoch_val_acc > best_metric:
                     best_metric = epoch_val_acc

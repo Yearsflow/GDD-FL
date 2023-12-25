@@ -54,18 +54,9 @@ def get_dataloader(args, request='dataloader'):
         public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
 
         transform_train = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.1307], std=[0.3081])
         ])
-
-        if args.approach in {'feddc', 'feddsa', 'feddm', 'fedgan', 'feddream'}:
-            transform_train = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.1307], std=[0.3081])
-            ])
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
