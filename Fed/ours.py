@@ -26,7 +26,7 @@ class Ours(FedDistill):
                             help='noise/real: initialize synthetic images from random noise or randomly sampled real images.')
         parser.add_argument('--aug_iter', type=int, default=100,
                             help='number of iterations to apply augmentation')
-        parser.add_argument('--aug_step', type=int, default=5,
+        parser.add_argument('--aug_step', type=int, default=10,
                             help='number of augmentation steps')
         parser.add_argument('--lr_aug', type=float, default=1.0,
                             help='learning rate for optimizing aug data')
@@ -310,13 +310,18 @@ class Ours(FedDistill):
                 loss_syn = criterion(output_syn, lab_syn)
                 gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
+                embed_real = net.module.embed(img_real).detach()
+                img_syn = img_syn.to(self.args.device, non_blocking=True)
+                embed_syn = net.module.embed(img_syn)
+
                 loss += match_loss(gw_syn, gw_real, self.args, self.appr_args)
+                loss += torch.sum((torch.mean(embed_real, dim=0) - torch.mean(embed_syn, dim=0)) ** 2)
 
             optimizer_img.zero_grad()
             loss.backward()
             optimizer_img.step()
 
-            ''' Update Network and Class Center'''
+            ''' Update Network and Class Center '''
             image_syn_train, label_syn_train = image_syn.detach(), label_syn.detach()
             dst_syn_train = TensorDataset(image_syn_train, label_syn_train)
             trainloader = DataLoader(dst_syn_train, num_workers=8, prefetch_factor=2*self.args.train_bs,

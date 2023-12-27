@@ -107,7 +107,7 @@ class FedDistill(FedAvg):
                                                 int(self.args.C * self.args.sample_fraction))
             party_list_this_round.sort()
     
-            for c_id in party_list_this_round[8:]:
+            for c_id in party_list_this_round:
                 self.logger.info('Client %d' % c_id)
 
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][c_id])
