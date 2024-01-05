@@ -7,39 +7,22 @@ import argparse
 from torch.utils.data import DataLoader
 from .central import Central
 
-class RS(Central):
+class CADA(Central):
 
     def __init__(self, args, appr_args, logger):
-        super(RS, self).__init__(args, appr_args, logger)
+        super(CADA, self).__init__(args, appr_args, logger)
 
     @staticmethod
     def extra_parser(extra_args):
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('--n_per_class', type=int, default=10,
-                            help='how many samples randomly selected for training')
-
         return parser.parse_args(extra_args)
     
     def run(self):
 
-        if self.args.dataset not in {'isic2020', 'EyePACS'}:
-            train_ds, val_ds, test_ds = get_dataloader(self.args, request='dataset')
-        else:
-            train_ds, val_ds, test_ds, n_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, test_ds, n_per_class = get_dataloader(self.args, request='dataset')
 
-        if self.args.dataset in {'mnist', 'cifar10'}:
-            n_classes = 10
-        elif self.args.dataset == 'cifar100':
-            n_classes = 100
-        elif self.args.dataset == 'isic2020':
-            n_classes = 2
-        elif self.args.dataset == 'EyePACS':
-            n_classes = 5
-        else:
-            raise NotImplementedError('Dataset Not Supported')
-
-        num_per_class = [0 for _ in range(n_classes)]
+        num_per_class = [0 for _ in range(self.args.n_classes)]
         dataidxs = []
         targets = train_ds.targets
         for i in range(len(targets)):

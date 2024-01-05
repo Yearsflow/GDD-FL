@@ -1,4 +1,4 @@
-from utils import get_dataloader, DatasetSplit, get_network
+from utils.common_utils import get_dataloader, DatasetSplit, get_network
 import torch
 import os
 import torch.nn as nn

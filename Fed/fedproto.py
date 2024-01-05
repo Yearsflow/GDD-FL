@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import copy
 import random
 from .fedavg import FedAvg
-from utils import get_dataloader, DatasetSplit, get_network
+from utils.common_utils import get_dataloader, DatasetSplit, get_network
 import torch.nn.functional as F
 
 class FedProto(FedAvg):

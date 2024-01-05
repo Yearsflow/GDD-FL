@@ -7,7 +7,7 @@ import json
 import datetime
 import logging
 from options import get_args
-from utils import mkdirs, seed_everything, get_dataset_info
+from utils.common_utils import mkdirs, seed_everything, get_dataset_info
 from PIL import ImageFile
 
 if __name__ == '__main__':

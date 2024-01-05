@@ -10,7 +10,7 @@ import random
 from .feddistill import FedDistill
 from torchvision.utils import save_image
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, get_loops
+from utils.common_utils import get_dataloader, DatasetSplit, get_network, get_loops
 from dream_utils import Normalize, random_indices, rand_bbox, ClassDataLoader, ClassMemDataLoader
 from dream_augment import DiffAug
 from torchvision import transforms

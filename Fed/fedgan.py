@@ -12,9 +12,12 @@ from .feddistill import FedDistill
 from dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from utils.common_utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from utils.fedgan_utils import Normalize, rand_bbox, AverageMeter
 from networks import Generator, Discriminator
 from torch.autograd import Variable
+from utils.fedgan_augment import DiffAug
+from torchvision import transforms
 
 class FedGAN(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -40,300 +43,17 @@ class FedGAN(FedDistill):
         parser.add_argument('--pt_decay', type=float, default=1e-5,
                             help='weight decay for pre-training network')
         parser.add_argument('--GAN_lr', type=float, default=0.00005,
-                            help='learning rate for training WGAN')
+                            help='learning rate for training GAN')
         parser.add_argument('--GAN_epochs', type=int, default=2000,
-                            help='number of epochs for training WGAN')
-        parser.add_argument('--n_critic', type=int, default=5, 
-                            help='number of training steps for discriminator per iter')
-        parser.add_argument('--clip_value', type=float, default=0.01,
-                            help='lower and upper clip value for disc. weights')
-        parser.add_argument('--z_lr', type=float, default=0.1,
-                            help='fixed learning rate for training z')
-        parser.add_argument('--z_epochs', type=int, default=300, 
-                            help='epochs to train z')
-        parser.add_argument('--z_bs', type=int, default=64,
-                            help='batch size for training z')
-        parser.add_argument('--ratio_div', type=float, default=0.001,
-                            help='ratio_div')
-        parser.add_argument('--condense_bs', type=int, default=64,
-                            help='batch size for sampling real images to condense knowledge')
+                            help='number of epochs for training GAN')
+        parser.add_argument('--GAN_bs', type=int, default=64,
+                            help='batch size for training GAN')
+        parser.add_argument('--dim', type=int, default=100,
+                            help='number of noise dimension')
         parser.add_argument('--ipc', type=int, default=1,
                             help='number of distilled images')
 
         return parser.parse_args(extra_args)
-
-    def local_pretrain(self, net, train_dl, val_dl):
-
-        criterion = nn.CrossEntropyLoss()
-        if self.appr_args.pt_optim == 'sgd':
-            optimizer = optim.SGD(net.parameters(), lr=self.appr_args.pt_lr, 
-                                  momentum=self.appr_args.pt_momentum,
-                                  weight_decay=self.appr_args.pt_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
-
-        best_metric, best_w = 0, None
-
-        for ep in range(self.appr_args.pt_epochs):
-            epoch_loss_collector = []
-            total, correct = 0, 0
-            logits, labels = [], []
-
-            net.train()
-            for batch_idx, (x, target) in enumerate(train_dl):
-                x = x.to(self.args.device, non_blocking=True)
-                x = DiffAugment(x, self.appr_args.diffaug_choice, seed=self.args.init_seed, param=ParamDiffAug())
-                target = target.long().to(self.args.device, non_blocking=True)
-                optimizer.zero_grad()
-                out = net(x)
-
-                loss = criterion(out, target)
-                _, pred_label = torch.max(out, 1)
-                total += x.data.size()[0]
-                correct += (pred_label == target.data).sum().item()
-                _, pred_label = torch.max(out.data, 1)
-                if self.args.n_classes > 2:
-                    for i in range(len(out)):
-                            logits.append(F.softmax(out[i], dim=0).cpu().tolist())
-                else:
-                    for i in range(len(out)):
-                        logits.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
-                labels += target.cpu().tolist()
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss_collector.append(loss.item())
-
-            epoch_train_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            epoch_train_acc = correct / float(total)
-            if self.args.dataset in ['isic2020', 'EyePACS']:
-                if self.args.n_classes > 2:
-                    epoch_train_auc = roc_auc_score(np.array(labels), np.array(logits), multi_class='ovo', labels=[_ for _ in range(self.args.n_classes)])
-                else:
-                    epoch_train_auc = roc_auc_score(np.array(labels), np.array(logits))
-            
-            epoch_loss_collector = []
-            logits, labels = [], []
-            total, correct = 0, 0
-
-            net.eval()
-            with torch.no_grad():
-                for batch_idx, (x, target) in enumerate(val_dl):
-                    x = x.to(self.args.device, non_blocking=True)
-                    target = target.long().to(self.args.device, non_blocking=True)
-                    out = net(x)
-
-                    loss = criterion(out, target)
-                    _, pred_label = torch.max(out.data, 1)
-                    if self.args.n_classes > 2:
-                        for i in range(len(out)):
-                            logits.append(F.softmax(out[i], dim=0).cpu().tolist())
-                    else:
-                        for i in range(len(out)):
-                            logits.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
-                    labels += target.data.cpu().tolist()
-                    epoch_loss_collector.append(loss.item())
-                    total += x.data.size()[0]
-                    correct += (pred_label == target.data).sum().item()
-
-            epoch_val_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            epoch_val_acc = correct / float(total)
-            if self.args.dataset in ['isic2020', 'EyePACS']:
-                if self.args.n_classes > 2:
-                    epoch_val_auc = roc_auc_score(np.array(labels), np.array(logits), multi_class='ovo', labels=[_ for _ in range(self.args.n_classes)])
-                else:
-                    epoch_val_auc = roc_auc_score(np.array(labels), np.array(logits))
-                
-            if self.args.dataset in ['isic2020', 'EyePACS']:
-                scheduler.step(epoch_val_auc)
-                if epoch_val_auc > best_metric:
-                    best_metric = epoch_val_auc
-                    best_w = copy.deepcopy(net.state_dict())
-            else:
-                scheduler.step(epoch_val_acc)
-                if epoch_val_acc > best_metric:
-                    best_metric = epoch_val_acc
-                    best_w = copy.deepcopy(net.state_dict())
-
-            if self.args.dataset in ['isic2020', 'EyePACS']:
-                self.logger.info('Epoch: %d Train loss: %f Train Acc: %f Train AUC: %f Val loss: %f Val Acc: %f Val AUC: %f' %
-                                (ep, epoch_train_loss, epoch_train_acc, epoch_train_auc, epoch_val_loss, epoch_val_acc, epoch_val_auc))
-            else:
-                self.logger.info('Epoch: %d Train loss: %f Train Acc: %f Val loss: %f Val Acc: %f' %
-                                (ep, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc))
-
-        return best_w
-    
-    def train_WGAN(self, G, D, train_dl, latent_dim=128):
-
-        optimizer_G = optim.RMSprop(G.parameters(), lr=self.appr_args.GAN_lr)
-        optimizer_D = optim.RMSprop(D.parameters(), lr=self.appr_args.GAN_lr)
-
-        if self.args.device != 'cpu':
-            G = nn.DataParallel(G)
-            D = nn.DataParallel(D)
-            G.to(self.args.device)
-            D.to(self.args.device)
-
-        for ep in range(self.appr_args.GAN_epochs):
-            for batch_idx, (x, target) in enumerate(train_dl):
-                real_imgs = Variable(x.to(self.args.device))
-                optimizer_D.zero_grad()
-
-                z = Variable(torch.FloatTensor(np.random.normal(0, 1, (x.shape[0], latent_dim))).to(self.args.device))
-
-                fake_imgs = G(z).detach()
-                loss_D = -torch.mean(D(real_imgs)) + torch.mean(D(fake_imgs))
-
-                loss_D.backward()
-                optimizer_D.step()
-
-                for p in D.parameters():
-                    p.data.clamp_(-self.appr_args.clip_value, self.appr_args.clip_value)
-
-                if batch_idx % self.appr_args.n_critic == 0:
-
-                    optimizer_G.zero_grad()
-                    gen_imgs = G(z)
-                    loss_G = -torch.mean(D(gen_imgs))
-
-                    loss_G.backward()
-                    optimizer_G.step()
-            
-                    self.logger.info('Epoch: %d Batch: %d D loss: %f G loss: %f' % (ep, batch_idx, loss_D.item(), loss_G.item()))
-
-    def get_images(self, c, n, indices_class, train_ds):
-
-        idx_shuffle = np.random.permutation(indices_class[c])[:n]
-        images = []
-        for idx in idx_shuffle:
-            images.append(torch.unsqueeze(train_ds[idx][0], dim=0))
-        return torch.cat(images, dim=0).to(self.args.device)
-
-    def train_z(self, net, G, indices_class, train_ds):
-
-        dim_z = 128
-
-        z = []
-        optimizers = []
-        for c in range(self.args.n_classes):
-            idxs = indices_class[c]
-            z_c = torch.randn(size=(len(idxs), dim_z), dtype=torch.float, requires_grad=True)
-            z.append(z_c)
-            optimizer_c = optim.Adam([z_c], lr=self.appr_args.z_lr, betas=[0.9, 0.999])
-            optimizers.append(optimizer_c)
-
-        self.logger.info('Train WGAN Inversion')
-        
-        for ep in range(self.appr_args.z_epochs):    
-            loss_feat_all = []
-            loss_pixel_all = []
-            loss_all = []
-
-            for c in range(self.args.n_classes):
-                idxs = indices_class[c]
-                labs = [c for _ in range(len(idxs))]
-
-                net.train()
-                for param in net.parameters():
-                    param.requires_grad = False
-                embed = net.module.embed
-                
-                for batch_idx in range(int(np.ceil(len(idxs) // self.appr_args.z_bs))):
-                    idx = np.arange(batch_idx * self.appr_args.z_bs, (batch_idx + 1) * self.appr_args.z_bs)
-                    z_syn = z[c][idx].to(self.args.device, non_blocking=True)
-                    lab_syn = torch.tensor([labs[i] for i in idx], dtype=torch.long, device=self.args.device)
-                    img_syn = G(z_syn)
-                    feat_syn = embed(img_syn)
-
-                    images = []
-                    for i in idx:
-                        images.append(torch.unsqueeze(train_ds[i][0], dim=0))
-                    img_real = torch.cat(images, dim=0).to(self.args.device, non_blocking=True).detach()
-                    feat_real = embed(img_real).detach()
-
-                    loss_feat = torch.mean((feat_syn - feat_real) ** 2)
-                    loss_pixel = torch.mean((img_syn - img_real) ** 2)
-                    loss = loss_feat + loss_pixel
-
-                    optimizers[c].zero_grad()
-                    loss.backward()
-                    optimizers[c].step()
-
-                    loss_feat_all.append(loss_feat.item())
-                    loss_pixel_all.append(loss_pixel.item())
-                    loss_all.append(loss.item())
-
-            self.logger.info('Epoch: %d loss: feat = %.4f pixel = %.4f sum = %.4f' % 
-                             (ep, np.mean(loss_feat_all), np.mean(loss_pixel_all), np.mean(loss_all)))
-        
-        optimizers = []
-        for c in range(self.args.n_classes):
-            optimizer_c = optim.Adam([z[c]], lr=self.appr_args.z_lr, betas=[0.9, 0.999])
-            optimizers.append(optimizer_c)
-
-        self.logger.info('Train WGAN z')
-
-        for ep in range(self.appr_args.z_epochs):
-            loss_divs_all = []
-            loss_cond_all = []
-            loss_all = []
-
-            for c in range(self.args.n_classes):
-                idxs = indices_class[c]
-                labs = [c for _ in range(len(idxs))]
-
-                net.train()
-                for param in net.parameters():
-                    param.requires_grad = False
-                embed = net.module.embed
-
-                for batch_idx in range(int(np.ceil(len(idxs) // self.appr_args.z_bs))):
-                    idx = np.arange(batch_idx * self.appr_args.z_bs, (batch_idx + 1) * self.appr_args.z_bs)
-                    z_syn = z[c][idx].to(self.args.device, non_blocking=True)
-                    lab_syn = torch.tensor([labs[i] for i in idx], dtype=torch.long, device=self.args.device)
-                    img_syn = G(z_syn)
-                    img_syn = DiffAugment(img_syn, self.appr_args.diffaug_choice, seed=self.args.init_seed, param=ParamDiffAug())
-                    feat_syn = embed(img_syn)
-
-                    images = []
-                    for i in idx:
-                        images.append(torch.unsqueeze(train_ds[i][0], dim=0))
-                    img_real = torch.cat(images, dim=0).to(self.args.device, non_blocking=True).detach()
-                    feat_real = embed(img_real).detach()
-
-                    if self.appr_args.ratio_div > 0.00001:
-                        loss_divs = torch.mean(torch.sum((feat_syn - feat_real) ** 2, dim=-1))
-                    else:
-                        loss_divs = torch.tensor(0.0).to(self.args.device)
-                    img_cond = self.get_images(c, self.appr_args.condense_bs, indices_class, train_ds)
-                    img_cond = DiffAugment(img_cond, self.appr_args.diffaug_choice, seed=self.args.init_seed, param=ParamDiffAug())
-
-                    feat_cond = torch.mean(embed(img_cond).detach(), dim=0)
-                    loss_cond = torch.sum((torch.mean(feat_syn, dim=0) - feat_cond) ** 2)
-
-                    loss = self.appr_args.ratio_div * loss_divs + (1 - self.appr_args.ratio_div) * loss_cond
-
-                    optimizers[c].zero_grad()
-                    loss.backward()
-                    optimizers[c].step()
-
-                    loss_divs_all.append(loss_feat.item())
-                    loss_cond_all.append(loss_pixel.item())
-                    loss_all.append(loss.item())
-
-            self.logger.info('Epoch: %d loss: divs = %.4f * %.3f cond = %.4f * %.3f weighted_sum = %.4f' % 
-                             (ep, np.mean(loss_divs_all), self.appr_args.ratio_div, np.mean(loss_cond_all), (1 - self.appr_args.ratio_div), np.mean(loss_all)))
-
-        return z
-    
-    def renormalize(self, img):
-
-        mean_GAN = [0.5, 0.5, 0.5]
-        std_GAN = [0.5, 0.5, 0.5]
-        
-        return torch.cat([(((img[:, 0] * std_GAN[0] + mean_GAN[0]) - self.args.mean[0]) / self.args.std[0]).unsqueeze(1),
-                          (((img[:, 1] * std_GAN[1] + mean_GAN[1]) - self.args.mean[1]) / self.args.std[1]).unsqueeze(1),
-                          (((img[:, 2] * std_GAN[2] + mean_GAN[2]) - self.args.mean[2]) / self.args.std[2]).unsqueeze(1)], dim=1)
     
     def get_synthetic_data(self, G, z):
 
@@ -355,6 +75,200 @@ class FedGAN(FedDistill):
                     syn_data['label'].append(lab_c[j])
 
         return syn_data
+    
+    def remove_aug(self, augtype, remove_aug):
+        aug_list = []
+        for aug in augtype.split("_"):
+            if aug not in remove_aug.split("_"):
+                aug_list.append(aug)
+
+        return "_".join(aug_list)
+    
+    def diffaug(self):
+        """Differentiable augmentation for condensation
+        """
+        aug_type = self.appr_args.aug_type
+        normalize = Normalize(mean=self.args.mean, std=self.args.std, device=self.args.device)
+        self.logger.info('Augmentataion Matching: %s' % aug_type)
+        augment = DiffAug(strategy=aug_type, batch=True)
+        aug_batch = transforms.Compose([normalize, augment])
+
+        if self.appr_args.mixup_net == 'cut':
+            aug_type = self.remove_aug(aug_type, 'cutout')
+        self.logger.info('Augmentataion Net update: %s' % aug_type)
+        augment_rand = DiffAug(strategy=aug_type, batch=False)
+        aug_rand = transforms.Compose([normalize, augment_rand])
+
+        return aug_batch, aug_rand
+    
+    def calc_gradient_penalty(self, args, discriminator, img_real, img_syn):
+        ''' Gradient penalty from Wasserstein GAN
+        '''
+        LAMBDA = 10
+        n_size = img_real.shape[-1]
+        batch_size = img_real.shape[0]
+        n_channels = img_real.shape[1]
+
+        alpha = torch.rand(batch_size, 1)
+        alpha = alpha.expand(batch_size, int(img_real.nelement() / batch_size)).contiguous()
+        alpha = alpha.view(batch_size, n_channels, n_size, n_size)
+        alpha = alpha.cuda()
+
+        img_syn = img_syn.view(batch_size, n_channels, n_size, n_size)
+        interpolates = alpha * img_real.detach() + ((1 - alpha) * img_syn.detach())
+
+        interpolates = interpolates.cuda()
+        interpolates.requires_grad_(True)
+
+        disc_interpolates, _ = discriminator(interpolates)
+
+        gradients = torch.autograd.grad(outputs=disc_interpolates, inputs=interpolates,
+                                        grad_outputs=torch.ones(disc_interpolates.size()).cuda(),
+                                        create_graph=True, retain_graph=True, only_inputs=True)[0]
+
+        gradients = gradients.view(gradients.size(0), -1)
+        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * LAMBDA
+        return gradient_penalty
+    
+    def train_epoch(self, args, G, D, optim_G, optim_D, trainloader, criterion, aug, aug_rand):
+        ''' The main training function for the generator '''
+        G.train()
+        gen_losses = AverageMeter()
+        disc_losses = AverageMeter()
+
+        for batch_idx, (x, target) in enumerate(trainloader):
+            x = x.to(self.args.device, non_blocking=True)
+            target = target.long().to(self.args.device, non_blocking=True)
+
+            # train the generator
+            D.eval()
+            optim_G.zero_grad()
+
+            # obtain the noise with one-hot class labels
+            noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
+            lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
+            lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
+            noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            noise = noise.to(self.args.device, non_blocking=True)
+
+            img_syn = G(noise)
+            gen_source, gen_class = D(img_syn)
+            gen_source = gen_source.mean()
+            gen_class = criterion(gen_class, target)
+            gen_loss = - gen_source + gen_class
+
+            gen_loss.backward()
+            optim_G.step()
+
+            # train the discriminator
+            D.train()
+            optim_D.zero_grad()
+            lab_syn = torch.randint(self.args.n_classes, (self.appr_args.GAN_bs,))
+            noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
+            lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
+            lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
+            noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            noise = noise.to(self.args.device, non_blocking=True)
+            lab_syn = lab_syn.to(self.args.device, non_blocking=True)
+
+            with torch.no_grad():
+                img_syn = G(noise)
+            
+            disc_fake_source, disc_fake_class = D(img_syn)
+            disc_fake_source = disc_fake_source.mean()
+            disc_fake_class = criterion(disc_fake_class, lab_syn)
+
+            disc_real_source, disc_real_class = D(x)
+            disc_real_source = disc_real_source.mean()
+            disc_real_class = criterion(disc_real_class, target)
+
+            gradient_penalty = self.calc_gradient_penalty(args, D, x, img_syn)
+
+            disc_loss = disc_fake_source - disc_real_source + disc_fake_class + disc_real_class + gradient_penalty
+            disc_loss.backward()
+            optim_D.step()
+
+            gen_losses.update(gen_loss.item())
+            disc_losses.update(disc_loss.item())
+
+        return gen_losses.avg, disc_losses.avg
+                        
+    def validate(self, args, G, val_dl, criterion, aug_rand):
+        ''' Validate the generator performance '''
+        net = get_network(self.args)
+        if args.device != 'cpu':
+            net = nn.DataParallel(net)
+            net.to(args.device)
+        net.train()
+        optimizer = optim.SGD(net.parameters(), lr=self.appr_args.eval_lr, momentum=self.appr_args.eval_mom,
+                              weight_decay=self.appr_args.eval_wd)
+
+        G.eval()
+        losses = AverageMeter()
+        
+        for ep in range(self.appr_args.eval_epochs):
+            for batch_idx in range(10 * self.appr_args.ipc // self.appr_args.eval_bs + 1):
+                # obtain pseudo samples with the generator
+                lab_syn = torch.randint(args.n_classes, (self.appr_args.eval_bs,))
+                noise = torch.normal(0, 1, (self.appr_args.eval_bs, self.appr_args.dim))
+                lab_onehot = torch.zeros((self.appr_args.eval_bs, args.n_classes))
+                lab_onehot[torch.arange(self.appr_args.eval_bs), lab_syn] = 1
+                noise[torch.arange(self.appr_args.eval_bs), :args.n_classes] = lab_onehot[torch.arange(self.appr_args.eval_bs)]
+                noise = noise.to(args.device, non_blocking=True)
+                lab_syn = lab_syn.to(args.device, non_blocking=True)
+
+                with torch.no_grad():
+                    img_syn = G(noise)
+                    img_syn = aug_rand((img_syn + 1.0) / 2.0)
+                
+                if np.random.rand(1) < self.appr_args.mix_p and self.appr_args.mixup_net == 'cut':
+                    lam = np.random.beta(args.beta, args.beta)
+                    rand_index = torch.randperm(len(img_syn)).cuda()
+
+                    lab_syn_b = lab_syn[rand_index]
+                    bbx1, bby1, bbx2, bby2 = rand_bbox(img_syn.size(), lam)
+                    img_syn[:, :, bbx1:bbx2, bby1:bby2] = img_syn[rand_index, :, bbx1:bbx2, bby1:bby2]
+                    ratio = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (img_syn.size()[-1] * img_syn.size()[-2]))
+
+                    output = net(img_syn)
+                    loss = criterion(output, lab_syn) * ratio + criterion(output, lab_syn_b) * (1. - ratio)
+                else:
+                    output = net(img_syn)
+                    loss = criterion(output, lab_syn)
+
+                losses.update(loss.item(), img_syn.shape[0])
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        return self.eval(net, val_dl)    
+
+    def train_GAN(self, G, D, train_dl, val_dl):
+
+        optimizer_G = optim.Adam(G.parameters(), lr=self.args.GAN_lr, betas=(0, 0.9))
+        optimizer_D = optim.Adam(D.parameters(), lr=self.args.GAN_lr, betas=(0, 0.9))
+        criterion = nn.CrossEntropyLoss()
+
+        best_metric = 0.0
+        best_G = None
+
+        aug, aug_rand = self.diffaug()
+        for ep in range(self.appr_args.GAN_epochs):
+            G.train()
+            D.train()
+            G_loss, D_loss = self.train_epoch(self.args, ep, G, D, optimizer_G, optimizer_D, train_dl, criterion, aug, aug_rand)
+
+            metric = self.validate(self.args, G, val_dl, criterion, aug_rand)
+            if self.args.dataset in ['mnist', 'cifar10']:
+                self.logger.info('Epoch: %d G loss: %f D loss: %f Val Acc: %f' % (ep, G_loss, D_loss, metric))
+            else:
+                self.logger.info('Epoch: %d G loss: %f D loss: %f Val AUC: %f' % (ep, G_loss, D_loss, metric))
+            if metric > best_metric:
+                best_metric = metric
+                best_G = copy.deepcopy(G.state_dict())
+        
+        return best_G
 
     def run(self):
 
@@ -379,32 +293,24 @@ class FedGAN(FedDistill):
                                                 int(self.args.C * self.args.sample_fraction))
             party_list_this_round.sort()
 
-            client_z = []
+            local_Gs = []
+            syn_data = {
+                'images': [],
+                'label': []
+            }
 
             for client_idx in party_list_this_round:
                 self.logger.info('Client %d' % client_idx)
 
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][client_idx])
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][client_idx])
-                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=2*self.args.train_bs,
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=16*self.args.test_bs,
+                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=2*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 
                 self.logger.info('Train batches: %d' % len(train_dl))
                 self.logger.info('Val batches: %d' % len(val_dl))
-
-                self.logger.info('Initialize local feature extractor')
-                if self.args.dataset in ['mnist', 'cifar10']:
-                    model = self.args.model
-                    self.args.model = 'ConvNet'
-                    local_net = get_network(self.args)
-                    self.args.model = model
-                else:
-                    local_net = get_network(self.args)
-                if self.args.device != 'cpu':
-                    local_net = nn.DataParallel(local_net)
-                    local_net.to(self.args.device)
                 
                 self.logger.info('Organize the real dataset')
                 labels_all = [train_ds.targets[i] for i in self.party2dataidx['train'][client_idx]]
@@ -414,43 +320,27 @@ class FedGAN(FedDistill):
                 for _ in range(self.args.n_classes):
                     self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
 
-                self.logger.info('Pretrain feature extractor')
-                w = self.local_pretrain(local_net, train_dl, val_dl)
-                local_net.load_state_dict(w)
-                torch.save(w,
-                    os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'local_client{}_round{}_FeatureExtractor_'.format(client_idx, round)+self.args.log_file_name+'.pth'))
+                self.logger.info('Train GAN')
+                local_G = Generator()
+                local_D = Discriminator()
+                if self.args.device != 'cpu':
+                    local_G = nn.DataParallel(local_G)
+                    local_D = nn.DataParallel(local_D)
+                    local_G.to(self.args.device)
+                    local_D.to(self.args.device)
 
-                self.logger.info('Train WGAN')
-                img_shape = (self.args.channel, self.args.im_size[0], self.args.im_size[1])
-                local_G = Generator(img_shape=img_shape)
-                local_D = Discriminator(img_shape=img_shape)
-
-                self.train_WGAN(local_G, local_D, train_dl)
-                local_G.eval()
-                for param in local_G.parameters():
-                    param.requires_grad = False
+                local_w = self.train_GAN(local_G, local_D, train_dl, val_dl)
+                local_G.load_state_dict(local_w)
+                local_Gs.append(local_G)
 
                 torch.save(local_G.state_dict(),
                     os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'local_client{}_round{}_WGAN_Generator_'.format(client_idx, round)+self.args.log_file_name+'.pth'))
 
-                self.logger.info('Train z')
-                z = self.train_z(local_net, local_G, indices_class, train_ds_c)
-                z_mean = np.mean([torch.mean(z[c]).item() for c in range(self.args.n_classes)])
-                z_std = np.mean([torch.std(z[c].reshape((-1))).item() for c in range(self.args.n_classes)])
-                self.logger.info('z mean = %.4f, z std = %.4f' % (z_mean, z_std))
-
-                torch.save(z,
-                    os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'local_client{}_round{}_ITGAN_z_'.format(client_idx, round)+self.args.log_file_name+'.pth'))
-                client_z.append(z)
-            
             self.logger.info('Initialize global net')
             global_net = get_network(self.args)
             if self.args.device != 'cpu':
                 global_net = nn.DataParallel(global_net)
                 global_net.to(self.args.device)
-            
-            self.logger.info('Get synthetic dataset')
-            syn_data = self.get_synthetic_data(local_G, client_z)
             
             self.logger.info('Train global net')
             global_w = self.global_train(global_net, syn_data)

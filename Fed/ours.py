@@ -11,7 +11,7 @@ import random
 from .feddistill import FedDistill
 from dataset_utils import TensorDataset
 import torch.nn.functional as F
-from utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug
+from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug
 
 class Ours(FedDistill):
     def __init__(self, args, appr_args, logger):
@@ -54,6 +54,10 @@ class Ours(FedDistill):
                             help='differentiable Siamese augmentation strategy')
         parser.add_argument('--aug_bs', type=int, default=64,
                             help='batch size for augmentation data')
+        parser.add_argument('--mix_ratio', type=float, default=0.5,
+                            help='sample ratio for real data and augmented data')
+        parser.add_argument('--loss_ratio', type=float, default=0.2,
+                            help='ratio for matching loss and grad loss, especially for Non-IID setting.')
 
         return parser.parse_args(extra_args)
     
@@ -61,6 +65,8 @@ class Ours(FedDistill):
 
         if self.args.partition == 'noniid':
             self.appr_args.init = 'noise'
+        elif self.args.partition == 'homo':
+            self.appr_args.loss_ratio = 0.5
         self.appr_args.dsa_param = ParamDiffAug()
         self.appr_args.dsa = False if self.appr_args.dsa_strategy in ['none', 'None'] else True
 
@@ -186,6 +192,60 @@ class Ours(FedDistill):
             dis = torch.arccos(dis) / torch.pi
 
         return dis
+    
+    def augmentation(self, aug_data, aug_indices_class, train_dl, class_centers):
+
+        if len(aug_data['images']) > 0:
+            aug_dst_tmp = TensorDataset(torch.stack(aug_data['images'], dim=0), torch.stack(aug_data['label'], dim=0))
+            aug_dl = DataLoader(aug_dst_tmp, num_workers=8, prefetch_factor=2*self.appr_args.aug_bs,
+                                batch_size=self.appr_args.aug_bs, shuffle=True, drop_last=False, pin_memory=True)
+            for batch_idx, (x, target) in enumerate(aug_dl):
+                x_aug = copy.deepcopy(x)
+                x = x.to(self.args.device, non_blocking=True)
+                x_aug = x_aug.to(self.args.device, non_blocking=True)
+                optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
+                                        weight_decay=self.appr_args.wd_aug)
+                for t in range(self.appr_args.aug_step):
+                    loss_exp = torch.tensor(0.0).to(self.args.device)
+                    loss_exp += self.compute_loss(x_aug, x, 'mse')
+                    loss_ac = torch.tensor(0.0).to(self.args.device)
+                    for i in range(len(x)):
+                        loss_ac += self.compute_loss(x_aug[i], class_centers[target[i]], 'ac')
+                    loss_ac = loss_ac / len(x)
+                    loss_exp -= loss_ac
+
+                    optimizer_aug.zero_grad()
+                    loss_exp.backward()
+                    optimizer_aug.step()
+            for i in range(len(x_aug)):
+                aug_data['images'].append(x_aug[i].detach().cpu())
+                aug_data['label'].append(target[i].detach().cpu())
+                aug_indices_class[target[i]].append(len(aug_data['label'])-1)
+
+        for batch_idx, (x, target) in enumerate(train_dl):
+            x_aug = copy.deepcopy(x)
+            x = x.to(self.args.device, non_blocking=True)
+            x_aug = x_aug.to(self.args.device, non_blocking=True)
+            optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
+                                        weight_decay=self.appr_args.wd_aug)
+            for t in range(self.appr_args.aug_step):
+                loss_exp = torch.tensor(0.0).to(self.args.device)
+                loss_exp += self.compute_loss(x_aug, x, 'mse')
+                loss_ac = torch.tensor(0.0).to(self.args.device)
+                for i in range(len(x)):
+                    loss_ac += self.compute_loss(x_aug[i], class_centers[target[i]], 'ac')
+                loss_ac = loss_ac / len(x)
+                loss_exp -= loss_ac
+
+                optimizer_aug.zero_grad()
+                loss_exp.backward()
+                optimizer_aug.step()
+        for i in range(len(x_aug)):
+            aug_data['images'].append(x_aug[i].detach().cpu())
+            aug_data['label'].append(target[i].detach().cpu())
+            aug_indices_class[target[i]].append(len(aug_data['label'])-1)
+
+        return aug_data, aug_indices_class
 
     def CADA(self, net, indices_class, image_syn, label_syn, train_ds, train_dl, val_dl):
 
@@ -231,55 +291,7 @@ class Ours(FedDistill):
             ''' CADA Domain Generalization '''
             if it % self.appr_args.aug_iter == 0:
 
-                if len(aug_data['images']) > 0:
-                    aug_dst_tmp = TensorDataset(torch.stack(aug_data['images'], dim=0), torch.stack(aug_data['label'], dim=0))
-                    aug_dl = DataLoader(aug_dst_tmp, num_workers=8, prefetch_factor=2*self.appr_args.aug_bs,
-                                        batch_size=self.appr_args.aug_bs, shuffle=True, drop_last=False, pin_memory=True)
-                    for batch_idx, (x, target) in enumerate(aug_dl):
-                        x_aug = copy.deepcopy(x)
-                        x = x.to(self.args.device, non_blocking=True)
-                        x_aug = x_aug.to(self.args.device, non_blocking=True)
-                        optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
-                                                weight_decay=self.appr_args.wd_aug)
-                        for t in range(self.appr_args.aug_step):
-                            loss_exp = torch.tensor(0.0).to(self.args.device)
-                            loss_exp += self.compute_loss(x_aug, x, 'mse')
-                            loss_ac = torch.tensor(0.0).to(self.args.device)
-                            for i in range(len(x)):
-                                loss_ac += self.compute_loss(x_aug[i], class_centers[target[i]], 'ac')
-                            loss_ac = loss_ac / len(x)
-                            loss_exp -= loss_ac
-
-                            optimizer_aug.zero_grad()
-                            loss_exp.backward()
-                            optimizer_aug.step()
-                    for i in range(len(x_aug)):
-                        aug_data['images'].append(x_aug[i].detach().cpu())
-                        aug_data['label'].append(target[i].detach().cpu())
-                        aug_indices_class[target[i]].append(len(aug_data['label'])-1)
-
-                for batch_idx, (x, target) in enumerate(train_dl):
-                    x_aug = copy.deepcopy(x)
-                    x = x.to(self.args.device, non_blocking=True)
-                    x_aug = x_aug.to(self.args.device, non_blocking=True)
-                    optimizer_aug = optim.SGD([x_aug, ], lr=self.appr_args.lr_aug, momentum=self.appr_args.mom_aug,
-                                              weight_decay=self.appr_args.wd_aug)
-                    for t in range(self.appr_args.aug_step):
-                        loss_exp = torch.tensor(0.0).to(self.args.device)
-                        loss_exp += self.compute_loss(x_aug, x, 'mse')
-                        loss_ac = torch.tensor(0.0).to(self.args.device)
-                        for i in range(len(x)):
-                            loss_ac += self.compute_loss(x_aug[i], class_centers[target[i]], 'ac')
-                        loss_ac = loss_ac / len(x)
-                        loss_exp -= loss_ac
-
-                        optimizer_aug.zero_grad()
-                        loss_exp.backward()
-                        optimizer_aug.step()
-                for i in range(len(x_aug)):
-                    aug_data['images'].append(x_aug[i].detach().cpu())
-                    aug_data['label'].append(target[i].detach().cpu())
-                    aug_indices_class[target[i]].append(len(aug_data['label'])-1)
+                aug_data, aug_indices_class = self.augmentation(aug_data, aug_indices_class, train_dl, class_centers)
                 aug_dst = TensorDataset(torch.stack(aug_data['images'], dim=0), torch.stack(aug_data['label'], dim=0))
 
             ''' Update Synthetic Data '''
@@ -288,10 +300,14 @@ class Ours(FedDistill):
                 if len(indices_class[c]) == 0:
                     continue
 
+                n = self.appr_args.batch_real
+                real_n = int(np.ceil(n * self.appr_args.mix_ratio))
+                aug_n = n - real_n
+
+                img_real = self.get_images(c, real_n, indices_class, train_ds)
                 if len(aug_indices_class[c]) > 0:
-                    img_real = self.get_images(c, self.appr_args.batch_real, aug_indices_class, aug_dst)
-                else:
-                    img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
+                    img_real = torch.cat([img_real, self.get_images(c, aug_n, aug_indices_class, aug_dst)], dim=0).to(self.args.device, non_blocking=True)
+
                 lab_real = torch.ones((img_real.shape[0], ), device=self.args.device, dtype=torch.long) * c
                 img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.args.channel, self.args.im_size[0], self.args.im_size[1]))
                 lab_syn = torch.ones((self.appr_args.ipc, ), device=self.args.device, dtype=torch.long) * c

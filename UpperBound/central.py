@@ -1,4 +1,4 @@
-from utils import get_dataloader
+from utils.common_utils import get_dataloader
 from networks import ResNet18
 import torch
 import os
