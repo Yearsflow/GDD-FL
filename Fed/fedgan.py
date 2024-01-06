@@ -28,23 +28,23 @@ class FedGAN(FedDistill):
     def extra_parser(extra_args):
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('--diffaug_choice', type=str, default='Auto',
-                            help='DSA augmentation choice')
-        parser.add_argument('--pt_lr', type=float, default=0.01,
-                            help='learning rate for pre-training network')
-        parser.add_argument('--pt_optim', type=str, default='sgd', 
-                            help='optimizer for pre-training network')
-        parser.add_argument('--pt_epochs', type=int, default=100,
-                            help='number of epochs for pre-training network')
-        parser.add_argument('--pt_bs', type=int, default=64,
-                            help='batch size for pre-training network')
-        parser.add_argument('--pt_momentum', type=float, default=0.9,
-                            help='momentum for pre-training network')
-        parser.add_argument('--pt_decay', type=float, default=1e-5,
-                            help='weight decay for pre-training network')
-        parser.add_argument('--GAN_lr', type=float, default=0.00005,
+        parser.add_argument('--mix_p', type=float, default=-1.0)
+        parser.add_argument('--beta', type=float, default=1.0)
+        parser.add_argument('--aug_type', type=str, default='color_crop_cutout')
+        parser.add_argument('--mixup_net', type=str, default='cut')
+        parser.add_argument('--eval_bs', type=int, default=64,
+                            help='batch size for validation')
+        parser.add_argument('--eval_epochs', type=int, default=100,
+                            help='training epochs for validation step')
+        parser.add_argument('--eval_lr', type=float, default=0.01,
+                            help='learning rate of training network for validation step')
+        parser.add_argument('--eval_mom', type=float, default=0.9,
+                            help='momentum for optimizer in validation step')
+        parser.add_argument('--eval_wd', type=float, default=1e-5,
+                            help='weight decay for optimizer in validation step')
+        parser.add_argument('--GAN_lr', type=float, default=1e-4,
                             help='learning rate for training GAN')
-        parser.add_argument('--GAN_epochs', type=int, default=2000,
+        parser.add_argument('--GAN_epochs', type=int, default=300,
                             help='number of epochs for training GAN')
         parser.add_argument('--GAN_bs', type=int, default=64,
                             help='batch size for training GAN')
@@ -54,27 +54,6 @@ class FedGAN(FedDistill):
                             help='number of distilled images')
 
         return parser.parse_args(extra_args)
-    
-    def get_synthetic_data(self, G, z):
-
-        syn_data = {
-            'images': [],
-            'label': []
-        }
-
-        for i in range(len(z)):
-            for c in range(self.args.n_classes):
-                z_c = torch.tensor(z[i][c][:self.appr_args.ipc], device=self.args.device).detach()
-                lab_c = torch.tensor([c for _ in range(self.appr_args.ipc)], dtype=torch.long)
-                img_syn = copy.deepcopy(G(z_c))
-                img_syn = self.renormalize(img_syn)
-                img_syn = img_syn.view(self.args.channel, self.args.im_size[0], self.args.im_size[1])
-                for j in range(len(img_syn)):
-                    syn_data['images'].append(img_syn[j].detach().cpu())
-                for j in range(len(lab_c)):
-                    syn_data['label'].append(lab_c[j])
-
-        return syn_data
     
     def remove_aug(self, augtype, remove_aug):
         aug_list = []
@@ -145,10 +124,16 @@ class FedGAN(FedDistill):
             optim_G.zero_grad()
 
             # obtain the noise with one-hot class labels
-            noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
-            lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
-            lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
-            noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            if len(target) == self.appr_args.GAN_bs:
+                noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
+                lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
+                lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
+                noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            else:
+                noise = torch.normal(0, 1, (len(target), self.appr_args.dim))
+                lab_onehot = torch.zeros((len(target), self.args.n_classes))
+                lab_onehot[torch.arange(len(target)), target] = 1
+                noise[torch.arange(len(target)), :self.args.n_classes] = lab_onehot[torch.arange(len(target))]
             noise = noise.to(self.args.device, non_blocking=True)
 
             img_syn = G(noise)
@@ -163,11 +148,18 @@ class FedGAN(FedDistill):
             # train the discriminator
             D.train()
             optim_D.zero_grad()
-            lab_syn = torch.randint(self.args.n_classes, (self.appr_args.GAN_bs,))
-            noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
-            lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
-            lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
-            noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            if len(target) == self.appr_args.GAN_bs:
+                lab_syn = torch.randint(self.args.n_classes, (self.appr_args.GAN_bs,))
+                noise = torch.normal(0, 1, (self.appr_args.GAN_bs, self.appr_args.dim))
+                lab_onehot = torch.zeros((self.appr_args.GAN_bs, self.args.n_classes))
+                lab_onehot[torch.arange(self.appr_args.GAN_bs), target] = 1
+                noise[torch.arange(self.appr_args.GAN_bs), :self.args.n_classes] = lab_onehot[torch.arange(self.appr_args.GAN_bs)]
+            else:
+                lab_syn = torch.randint(self.args.n_classes, (len(target),))
+                noise = torch.normal(0, 1, (len(target), self.appr_args.dim))
+                lab_onehot = torch.zeros((len(target), self.args.n_classes))
+                lab_onehot[torch.arange(len(target)), target] = 1
+                noise[torch.arange(len(target)), :self.args.n_classes] = lab_onehot[torch.arange(len(target))]
             noise = noise.to(self.args.device, non_blocking=True)
             lab_syn = lab_syn.to(self.args.device, non_blocking=True)
 
@@ -222,7 +214,7 @@ class FedGAN(FedDistill):
                     img_syn = aug_rand((img_syn + 1.0) / 2.0)
                 
                 if np.random.rand(1) < self.appr_args.mix_p and self.appr_args.mixup_net == 'cut':
-                    lam = np.random.beta(args.beta, args.beta)
+                    lam = np.random.beta(self.appr_args.beta, self.appr_args.beta)
                     rand_index = torch.randperm(len(img_syn)).cuda()
 
                     lab_syn_b = lab_syn[rand_index]
@@ -246,8 +238,8 @@ class FedGAN(FedDistill):
 
     def train_GAN(self, G, D, train_dl, val_dl):
 
-        optimizer_G = optim.Adam(G.parameters(), lr=self.args.GAN_lr, betas=(0, 0.9))
-        optimizer_D = optim.Adam(D.parameters(), lr=self.args.GAN_lr, betas=(0, 0.9))
+        optimizer_G = optim.Adam(G.parameters(), lr=self.appr_args.GAN_lr, betas=(0, 0.9))
+        optimizer_D = optim.Adam(D.parameters(), lr=self.appr_args.GAN_lr, betas=(0, 0.9))
         criterion = nn.CrossEntropyLoss()
 
         best_metric = 0.0
@@ -257,7 +249,7 @@ class FedGAN(FedDistill):
         for ep in range(self.appr_args.GAN_epochs):
             G.train()
             D.train()
-            G_loss, D_loss = self.train_epoch(self.args, ep, G, D, optimizer_G, optimizer_D, train_dl, criterion, aug, aug_rand)
+            G_loss, D_loss = self.train_epoch(self.args, G, D, optimizer_G, optimizer_D, train_dl, criterion, aug, aug_rand)
 
             metric = self.validate(self.args, G, val_dl, criterion, aug_rand)
             if self.args.dataset in ['mnist', 'cifar10']:
@@ -269,16 +261,36 @@ class FedGAN(FedDistill):
                 best_G = copy.deepcopy(G.state_dict())
         
         return best_G
+    
+    def get_synthetic_data(self, Gs):
+
+        syn_data = {
+            'images': [],
+            'label': []
+        }
+        n = self.appr_args.ipc * self.args.n_classes
+
+        for G in Gs:
+            G.eval()
+            lab_syn = torch.tensor(np.array([np.ones(self.appr_args.ipc)*i for i in range(self.args.n_classes)]),
+                                dtype=torch.long, requires_grad=False).view(-1)
+            noise = torch.normal(0, 1, (n, self.appr_args.dim))
+            lab_onehot = torch.zeros((n, self.args.n_classes))
+            lab_onehot[torch.arange(n), lab_syn] = 1
+            noise[torch.arange(n), :self.args.n_classes] = lab_onehot[torch.arange(n)]
+            noise = noise.to(self.args.device, non_blocking=True)
+            lab_syn = lab_syn.to(self.args.device, non_blocking=True)
+            
+            with torch.no_grad():
+                img_syn = G(noise)
+
+            for j in range(len(img_syn)):
+                syn_data['images'].append(img_syn[j].detach().cpu())
+                syn_data['label'].append(lab_syn[j].detach().cpu())
+
+        return syn_data
 
     def run(self):
-
-        if self.appr_args.diffaug_choice == 'Auto':
-            if self.args.dataset == 'mnist':
-                self.appr_args.diffaug_choice = 'color_crop_cutout_scale_rotate'
-            else:
-                self.appr_args.diffaug_choice = 'color_crop_cutout_flip_scale_rotate'
-        else:
-            self.appr_args.diffaug_choice = 'None'
         
         self.logger.info('Partitioning data...')
 
@@ -294,10 +306,6 @@ class FedGAN(FedDistill):
             party_list_this_round.sort()
 
             local_Gs = []
-            syn_data = {
-                'images': [],
-                'label': []
-            }
 
             for client_idx in party_list_this_round:
                 self.logger.info('Client %d' % client_idx)
@@ -321,8 +329,8 @@ class FedGAN(FedDistill):
                     self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
 
                 self.logger.info('Train GAN')
-                local_G = Generator()
-                local_D = Discriminator()
+                local_G = Generator(self.args)
+                local_D = Discriminator(self.args)
                 if self.args.device != 'cpu':
                     local_G = nn.DataParallel(local_G)
                     local_D = nn.DataParallel(local_D)
@@ -334,7 +342,7 @@ class FedGAN(FedDistill):
                 local_Gs.append(local_G)
 
                 torch.save(local_G.state_dict(),
-                    os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'local_client{}_round{}_WGAN_Generator_'.format(client_idx, round)+self.args.log_file_name+'.pth'))
+                    os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'local_client{}_round{}_Generator_'.format(client_idx, round)+self.args.log_file_name+'.pth'))
 
             self.logger.info('Initialize global net')
             global_net = get_network(self.args)
@@ -342,6 +350,9 @@ class FedGAN(FedDistill):
                 global_net = nn.DataParallel(global_net)
                 global_net.to(self.args.device)
             
+            self.logger.info('Get synthetic data')
+            syn_data = self.get_synthetic_data(local_Gs)
+
             self.logger.info('Train global net')
             global_w = self.global_train(global_net, syn_data)
             global_net.load_state_dict(global_w)

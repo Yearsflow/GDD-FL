@@ -58,6 +58,12 @@ def get_dataloader(args, request='dataloader'):
             transforms.Normalize(mean=[0.1307], std=[0.3081])
         ])
 
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5], std=[0.5])
+            ])
+
         transform_test = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.1307], std=[0.3081])
@@ -94,6 +100,11 @@ def get_dataloader(args, request='dataloader'):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
                                  std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
+            ])
+        elif args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
         transform_test = transforms.Compose([
@@ -167,6 +178,17 @@ def get_dataloader(args, request='dataloader'):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.Resize((240, 240)),
+                transforms.CenterCrop(224),
+                transforms.RandomApply([transforms.RandomAffine(degrees=30)], p=0.3),
+                transforms.RandomApply([transforms.ColorJitter(contrast=random.choice((0.5, 1.5)))], p=0.2),
+                transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))], p=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
+
         transform_test = transforms.Compose([
             transforms.Resize((240, 240)),
             transforms.CenterCrop(224),
@@ -228,6 +250,17 @@ def get_dataloader(args, request='dataloader'):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.Resize((240, 240)),
+                transforms.CenterCrop(224),
+                transforms.RandomApply([transforms.RandomAffine(degrees=30)], p=0.3),
+                transforms.RandomApply([transforms.ColorJitter(contrast=random.choice((0.5, 1.5)))], p=0.2),
+                transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))], p=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
 
         transform_test = transforms.Compose([
             transforms.Resize((240, 240)),

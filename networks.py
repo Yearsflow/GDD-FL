@@ -345,7 +345,7 @@ class Generator(nn.Module):
         self.bn0 = nn.BatchNorm1d(196*4*4)
         self.relu0 = nn.ReLU()
 
-        if args.data == 'mnist':
+        if args.dataset == 'mnist':
             self.conv1 = nn.ConvTranspose2d(196, 196, kernel_size=3, stride=2, padding=1)
         else:
             self.conv1 = nn.ConvTranspose2d(196, 196, kernel_size=4, stride=2, padding=1)
@@ -379,7 +379,7 @@ class Generator(nn.Module):
         self.bn7 = nn.BatchNorm2d(196)
         self.relu7 = nn.ReLU()
 
-        if args.data == 'mnist':
+        if args.dataset == 'mnist':
             self.conv8 = nn.Conv2d(196, 1, kernel_size=3, stride=1, padding=1)
         else:
             self.conv8 = nn.Conv2d(196, 3, kernel_size=3, stride=1, padding=1)
