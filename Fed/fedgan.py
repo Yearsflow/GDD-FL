@@ -28,13 +28,13 @@ class FedGAN(FedDistill):
     def extra_parser(extra_args):
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('--mix_p', type=float, default=-1.0)
+        parser.add_argument('--mix_p', type=float, default=1.0)
         parser.add_argument('--beta', type=float, default=1.0)
         parser.add_argument('--aug_type', type=str, default='color_crop_cutout')
         parser.add_argument('--mixup_net', type=str, default='cut')
         parser.add_argument('--eval_bs', type=int, default=64,
                             help='batch size for validation')
-        parser.add_argument('--eval_epochs', type=int, default=100,
+        parser.add_argument('--eval_epochs', type=int, default=10,
                             help='training epochs for validation step')
         parser.add_argument('--eval_lr', type=float, default=0.01,
                             help='learning rate of training network for validation step')
