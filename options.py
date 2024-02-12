@@ -37,14 +37,10 @@ def get_args():
                         help='batch size for testing')
     parser.add_argument('--lr', type=float, default=0.01,
                         help='learning rate (default: 0.01)')
-    parser.add_argument('--momentum', type=float, default=0.9,
-                        help='momentum of sgd optimizer')
-    parser.add_argument('--epochs', type=int, default=5,
+    parser.add_argument('--epochs', type=int, default=100,
                         help='number of local epochs')   
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                        help="weight decay during local training")
-    parser.add_argument('--optimizer', type=str, default='sgd',
-                        help='the optimizer')
+    parser.add_argument('--lrf', type=float, default=0.01,
+                        help='cosine learning rate scheduler')
     
     # logging parameters
     parser.add_argument('--print_interval', type=int, default=50,

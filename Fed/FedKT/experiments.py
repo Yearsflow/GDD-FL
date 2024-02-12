@@ -27,7 +27,8 @@ import pandas as pd
 from model import *
 from networks import ResNet18
 # from datasets import MNIST_truncated, SVHN_custom, CustomTensorDataset, CelebA_custom, ImageFolder_custom, PneumoniaDataset, ImageFolder_public
-from dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit, TensorDataset
+from dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit, TensorDataset, ImageFolder_custom
+from common_utils import seed_everything, get_dataset_info
 from trees import *
 from torchvision import datasets
 
@@ -41,12 +42,12 @@ n_workers = 0
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='MLP', help='neural network used in training')
+    parser.add_argument('--model', type=str, default='ResNet18', help='neural network used in training')
     parser.add_argument('--dataset', type=str, default='mnist', help='dataset used for training')
     parser.add_argument('--net_config', type=lambda x: list(map(int, x.split(', '))))
     parser.add_argument('--partition', type=str, default='noniid', help='how to partition the dataset on local workers')
-    parser.add_argument('--batch-size', type=int, default=128, help='input batch size for training (default: 64)')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate (default: 0.01)')
+    parser.add_argument('--batch-size', type=int, default=64, help='input batch size for training (default: 64)')
+    parser.add_argument('--lr', type=float, default=0.01, help='learning rate (default: 0.01)')
     parser.add_argument('--epochs', type=int, default=5, help='how many epochs will be trained in a training process')
     parser.add_argument('--n_parties', type=int, default=2, help='number of workers in a distributed cluster')
     parser.add_argument('--n_teacher_each_partition', type=int, default=1,
@@ -149,34 +150,6 @@ def load_svhn_data(datadir):
 
     return (X_train, y_train, X_test, y_test)
 
-
-def load_celeba_data(datadir):
-
-    transform = transforms.Compose([transforms.ToTensor()])
-
-    celeba_train_ds = CelebA_custom(datadir, split='train', target_type="attr", download=True, transform=transform)
-    celeba_test_ds = CelebA_custom(datadir, split='test', target_type="attr", download=True, transform=transform)
-
-    gender_index = celeba_train_ds.attr_names.index('Male')
-    y_train =  celeba_train_ds.attr[:,gender_index:gender_index+1].reshape(-1)
-    y_test = celeba_test_ds.attr[:,gender_index:gender_index+1].reshape(-1)
-
-    # y_train = y_train.numpy()
-    # y_test = y_test.numpy()
-
-    return (None, y_train, None, y_test)
-
-def load_xray_data(datadir):
-    transform = transforms.Compose([transforms.ToTensor()])
-    xray_train_ds = ImageFolder_custom(datadir+'./train/', transform=transform)
-    xray_test_ds = ImageFolder_custom(datadir+'./test/', transform=transform)
-
-    X_train, y_train = xray_train_ds.samples, xray_train_ds.target
-    X_test, y_test = xray_test_ds.samples, xray_test_ds.target
-
-    return (X_train, y_train, X_test, y_test)
-
-
 def record_net_data_stats(y_train, net_dataidx_map, logdir):
 
     net_cls_counts = {}
@@ -189,84 +162,6 @@ def record_net_data_stats(y_train, net_dataidx_map, logdir):
     logger.info('Data statistics: %s' % str(net_cls_counts))
 
     return net_cls_counts
-
-
-# def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4, min_require=None):
-#     if dataset == 'mnist':
-#         X_train, y_train, X_test, y_test = load_mnist_data(datadir)
-#     elif dataset == 'svhn':
-#         X_train, y_train, X_test, y_test = load_svhn_data(datadir)
-#     elif dataset == 'celeba':
-#         X_train, y_train, X_test, y_test = load_celeba_data(datadir)
-#     elif dataset == 'xray' :
-#         X_train, y_train, X_test, y_test = load_xray_data(datadir)
-#     elif dataset in libsvm_datasets:
-#         # X_train, y_train = load_svmlight_file(datadir + dataset + '.train')
-#         # X_test, y_test = load_svmlight_file(datadir + dataset + '.test')
-#         X, y = load_svmlight_file(datadir + dataset)
-#         y_i_transform = np.zeros(y.size)
-#         for i in range(y.size):
-#             if y[i] == y[0]:
-#                 y_i_transform[i] = 1
-#         y=np.copy(y_i_transform)
-#         X_train, X_test, y_train, y_test = train_test_split(X, y)
-
-#     n_train = y_train.shape[0]
-
-#     if partition == "homo":
-#         idxs = np.random.permutation(n_train)
-#         batch_idxs = np.array_split(idxs, n_parties)
-#         net_dataidx_map = {i: batch_idxs[i] for i in range(n_parties)}
-
-
-#     elif partition == "hetero-dir":
-#         min_size = 0
-#         min_require_size = 10
-#         if min_require is not None:
-#             min_require_size = min_require
-#         if dataset == 'mnist' or dataset == 'svhn':
-#             K = 10
-#         elif dataset in libsvm_datasets or dataset == 'celeba' or dataset == 'xray':
-#             K = 2
-#             # min_require_size = 100
-
-#         N = y_train.shape[0]
-#         net_dataidx_map = {}
-
-#         while min_size < min_require_size:
-#             idx_batch = [[] for _ in range(n_parties)]
-#             for k in range(K):
-#                 idx_k = np.where(y_train == k)[0]
-#                 np.random.shuffle(idx_k)
-#                 proportions = np.random.dirichlet(np.repeat(beta, n_parties))
-#                 # print("proportions1: ", proportions)
-#                 # print("sum pro1:", np.sum(proportions))
-#                 ## Balance
-#                 proportions = np.array([p * (len(idx_j) < N / n_parties) for p, idx_j in zip(proportions, idx_batch)])
-#                 # print("proportions2: ", proportions)
-#                 proportions = proportions / proportions.sum()
-#                 # print("proportions3: ", proportions)
-#                 proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
-#                 # print("proportions4: ", proportions)
-#                 idx_split = np.split(idx_k, proportions)
-#                 idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, idx_split)]
-#                 min_size = min([len(idx_j) for idx_j in idx_batch])
-#                 if min_require is not None:
-#                     min_size = min(min_size, min([len(idx) for idx in idx_split]))
-#                 # if K == 2 and n_parties <= 10:
-#                 #     if np.min(proportions) < 200:
-#                 #         min_size = 0
-#                 #         break
-
-#         for j in range(n_parties):
-#             np.random.shuffle(idx_batch[j])
-#             net_dataidx_map[j] = idx_batch[j]
-
-#     traindata_cls_counts = record_net_data_stats(y_train, net_dataidx_map, logdir)
-
-#     return (X_train, y_train, X_test, y_test, net_dataidx_map, traindata_cls_counts)
-
-
 
 def partition(args, train_ds, val_ds):
 
@@ -414,8 +309,12 @@ def init_nets(net_configs, dropout_p, n_parties, args, n_teacher_each_partition 
                 net = ResNet18(args, channel=3, num_classes=10)
             elif args.dataset == 'isic2020':
                 net = ResNet18(args, channel=3, num_classes=2)
+                num_ftrs = net.classifier.in_features
+                net.classifier = nn.Linear(num_ftrs * 4 * 4, args.n_classes)
             elif args.dataset == 'EyePACS':
                 net = ResNet18(args, channel=3, num_classes=5)
+                num_ftrs = net.classifier.in_features
+                net.classifier = nn.Linear(num_ftrs * 4 * 4, args.n_classes)
         else:
             print("not supported yet")
             exit(1)
@@ -1115,9 +1014,9 @@ def local_train_net_on_a_party(nets, args, net_dataidx_map, party_id, train_ds, 
             # train_dl_local = data.DataLoader(dataset=train_ds_local, batch_size=args.batch_size, shuffle=True)
             # test_dl_global = data.DataLoader(dataset=remain_test_ds, batch_size=32, shuffle=False)
         else:
-            train_dl_local = data.DataLoader(DatasetSplit(train_ds, train_dataidxs), num_workers=8, prefetch_factor=16*args.train_bs,
+            train_dl_local = data.DataLoader(DatasetSplit(train_ds, train_dataidxs), num_workers=8, prefetch_factor=2*args.train_bs,
                                     batch_size=args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-            val_dl_local = data.DataLoader(DatasetSplit(val_ds, val_dataidxs), num_workers=8, prefetch_factor=16*args.test_bs,
+            val_dl_local = data.DataLoader(DatasetSplit(val_ds, val_dataidxs), num_workers=8, prefetch_factor=2*args.test_bs,
                                     batch_size=args.test_bs, shuffle=False, pin_memory=True)
             test_dl_global = remain_test_dl
             # train_dl_local, test_dl_local, _, _ = get_dataloader(args.dataset, args.datadir, args.batch_size, 32, dataidxs)
@@ -1181,95 +1080,7 @@ def central_train_net_on_a_party(nets, args, X_train = None, y_train = None, X_t
     nets_list = list(nets.values())
     return nets_list
 
-
-# def get_dataloader(dataset, datadir, train_bs, test_bs, dataidxs=None, no_trans=None):
-#     if dataset in ('mnist', 'svhn'):
-#         if dataset == 'mnist':
-#             dl_obj = MNIST_truncated
-
-#             transform_train = transforms.Compose([
-#                 transforms.ToTensor(),
-#                 transforms.Normalize((0.1307,), (0.3081,))])
-
-#             transform_test = transforms.Compose([
-#                 transforms.ToTensor(),
-#                 transforms.Normalize((0.1307,), (0.3081,))])
-
-#         elif dataset == 'svhn':
-#             dl_obj = SVHN_custom
-#             transform_train = transforms.Compose([
-#                 transforms.ToTensor(),
-#                 # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-#                 transforms.Normalize((0.4376821, 0.4437697, 0.47280442), (0.19803012, 0.20101562, 0.19703614))
-#             ])
-#             transform_test = transforms.Compose([
-#                 transforms.ToTensor(),
-#                 # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-#                 transforms.Normalize((0.4376821, 0.4437697, 0.47280442), (0.19803012, 0.20101562, 0.19703614))
-#             ])
-
-#         if no_trans == 'test':
-#             # transform_train = None
-#             transform_test = None
-#         train_ds = dl_obj(datadir, dataidxs=dataidxs, train=True, transform=transform_train, download=True)
-#         test_ds = dl_obj(datadir, train=False, transform=transform_test, download=True)
-
-#         train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=n_workers)
-#         test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
-
-
-#     elif dataset == 'celeba':
-#         dl_obj = CelebA_custom
-#         transform_train = transforms.Compose([
-#             transforms.Resize(32),
-#             transforms.CenterCrop(32),
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#         ])
-#         transform_test = transforms.Compose([
-#             transforms.Resize(32),
-#             transforms.CenterCrop(32),
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#         ])
-
-#         if no_trans == 'test':
-#             # transform_train = None
-#             transform_test = None
-
-#         train_ds = dl_obj(datadir, dataidxs=dataidxs, split='train', target_type="attr", transform=transform_train, download=True)
-#         test_ds = dl_obj(datadir, split='test', target_type="attr", transform=transform_test, download=True)
-
-#         train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=n_workers)
-#         test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
-
-#     elif dataset == 'xray':
-#         dl_obj = ImageFolder_custom
-
-#         transform_train = transforms.Compose([
-#             transforms.Resize(32),
-#             transforms.CenterCrop(32),
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#         ])
-#         transform_test = transforms.Compose([
-#             transforms.Resize(32),
-#             transforms.CenterCrop(32),
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-#         ])
-
-#         if no_trans == 'test':
-#             # transform_train = None
-#             transform_test = None
-#         train_ds = dl_obj(datadir+'./train/', dataidxs=dataidxs, transform=transform_train)
-#         test_ds = dl_obj(datadir+'./test/', transform=transform_test)
-
-#         train_dl = data.DataLoader(dataset=train_ds, batch_size=train_bs, shuffle=True, num_workers=n_workers)
-#         test_dl = data.DataLoader(dataset=test_ds, batch_size=test_bs, shuffle=False)
-#     return train_dl, test_dl, train_ds, test_ds
-
-def get_dataloader(args, request='dataloader'):
+def get_dataloader(args):
 
     num_per_class = None
     
@@ -1287,6 +1098,12 @@ def get_dataloader(args, request='dataloader'):
             transforms.Normalize(mean=[0.1307], std=[0.3081])
         ])
 
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5], std=[0.5])
+            ])
+
         transform_test = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.1307], std=[0.3081])
@@ -1296,10 +1113,6 @@ def get_dataloader(args, request='dataloader'):
         val_ds = MNIST_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
         public_ds = MNIST_truncated(args.datadir, dataidxs=public_idxs, train=True, transform=transform_test, download=True)
         test_ds = MNIST_truncated(args.datadir, train=False, transform=transform_test, download=True)
-
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=args.train_bs, drop_last=False, shuffle=True, num_workers=16, pin_memory=True)
-        val_dl = data.DataLoader(dataset=val_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
         
     elif args.dataset == 'cifar10':
 
@@ -1313,8 +1126,14 @@ def get_dataloader(args, request='dataloader'):
         transform_train = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
-                                std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
+                                 std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
         ])
+
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
@@ -1326,10 +1145,6 @@ def get_dataloader(args, request='dataloader'):
         val_ds = CIFAR10_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
         public_ds = CIFAR10_truncated(args.datadir, dataidxs=public_idxs, train=True, transform=transform_test, download=True)
         test_ds = CIFAR10_truncated(args.datadir, train=False, transform=transform_test, download=True)
-
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=args.train_bs, drop_last=False, shuffle=True, num_workers=16, pin_memory=True)
-        val_dl = data.DataLoader(dataset=val_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
         
     elif args.dataset == 'cifar100':
 
@@ -1358,61 +1173,36 @@ def get_dataloader(args, request='dataloader'):
         train_ds = CIFAR100_truncated(args.datadir, dataidxs=train_idxs, train=True, transform=transform_train, download=True)
         val_ds = CIFAR100_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
         test_ds = CIFAR100_truncated(args.datadir, train=False, transform=transform_test, download=True)
-
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=args.train_bs, drop_last=False, shuffle=True, num_workers=16, pin_memory=True)
-        val_dl = data.DataLoader(dataset=val_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
         
     elif args.dataset == 'isic2020':
 
         n_train = [19381, 351]
         n_val, n_public = [3326, 58], [3326, 58]
         n_test = [6509, 117]
-        idxs = [[_ for _ in range(32542)], [__+32542 for __ in range(584)]]
-        train_idxs, val_idxs = [None for _ in range(2)], [None for _ in range(2)]
-        public_idxs, test_idxs = [None for _ in range(2)], [None for _ in range(2)]
-        for i in range(2):
-            random.shuffle(idxs[i])
-            train_idxs[i] = idxs[i][: n_train[i]]
-            val_idxs[i] = idxs[i][n_train[i]: n_train[i] + n_val[i]]
-            public_idxs[i] = idxs[i][n_train[i] + n_val[i]: n_train[i] + n_val[i] + n_public[i]]
-            test_idxs[i] = idxs[i][n_train[i] + n_val[i] + n_public[i]: ]
 
         transform_train = transforms.Compose([
-            transforms.Resize((240, 240)),
-            transforms.CenterCrop(224),
-            transforms.RandomApply([transforms.RandomAffine(degrees=30)], p=0.3),
-            transforms.RandomApply([transforms.ColorJitter(contrast=random.choice((0.5, 1.5)))], p=0.2),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))], p=0.2),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
 
         transform_test = transforms.Compose([
-            transforms.Resize((240, 240)),
-            transforms.CenterCrop(224),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        total_train_idxs = train_idxs[0] + train_idxs[1]
-        train_targets = [0 for _ in range(len(train_idxs[0]))] + [1 for _ in range(len(train_idxs[1]))]
-        total_val_idxs = val_idxs[0] + val_idxs[1]
-        val_targets = [0 for _ in range(len(val_idxs[0]))] + [1 for _ in range(len(val_idxs[1]))]
-        total_public_idxs = public_idxs[0] + public_idxs[1]
-        public_targets = [0 for _ in range(len(public_idxs[0]))] + [1 for _ in range(len(public_idxs[1]))]
-        total_test_idxs = test_idxs[0] + test_idxs[1]
-
-        dst = datasets.ImageFolder(root=args.datadir)
-
-        train_ds = DatasetSplit(dataset=dst, idxs=total_train_idxs, transform=transform_train, targets=train_targets)
-        val_ds = DatasetSplit(dataset=dst, idxs=total_val_idxs, transform=transform_test, targets=val_targets)
-        public_ds = DatasetSplit(dataset=dst, idxs=total_public_idxs, transform=transform_test, targets=public_targets)
-        test_ds = DatasetSplit(dataset=dst, idxs=total_test_idxs, transform=transform_test)
-
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=args.train_bs, drop_last=False, shuffle=True, num_workers=16, pin_memory=True)
-        val_dl = data.DataLoader(dataset=val_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=args.test_bs, shuffle=False, num_workers=16, pin_memory=True)
+        train_ds =ImageFolder_custom(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        val_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        public_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        test_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
@@ -1420,64 +1210,36 @@ def get_dataloader(args, request='dataloader'):
             'public': n_public,
             'test': n_test
         }
-
-        if request == 'dataloader':
-            return train_dl, val_dl, test_dl, num_per_class
-        elif request == 'dataset':
-            return train_ds, val_ds, test_ds, num_per_class
 
     elif args.dataset == 'EyePACS':
 
         n_train = [23229, 2199, 4763, 786, 638]
         n_public, n_val = [2581, 244, 529, 87, 70], [8130, 720, 1579, 237, 240]
         n_test = [31403, 3042, 6282, 977, 966]
-        idxs = [[_ for _ in range(n_train[0] + n_public[0])], 
-                [_ + n_train[0] + n_public[0] for _ in range(n_train[1] + n_public[1])], 
-                [_ + sum(n_train[:2]) + sum(n_public[:2]) for _ in range(n_train[2] + n_public[2])], 
-                [_ + sum(n_train[:3]) + sum(n_public[:3]) for _ in range(n_train[3] + n_public[3])],
-                [_ + sum(n_train[:4]) + sum(n_public[:4]) for _ in range(n_train[4] + n_public[4])]]
-        train_idxs = [None for _ in range(5)]
-        public_idxs = [None for _ in range(5)]
-        for i in range(5):
-            random.shuffle(idxs[i])
-            train_idxs[i] = idxs[i][: n_train[i]]
-            public_idxs[i] = idxs[i][n_train[i]:]
 
         transform_train = transforms.Compose([
-            transforms.Resize((240, 240)),
-            transforms.CenterCrop(224),
-            transforms.RandomApply([transforms.RandomAffine(degrees=30)], p=0.3),
-            transforms.RandomApply([transforms.ColorJitter(contrast=random.choice((0.5, 1.5)))], p=0.2),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 5))], p=0.2),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+        if args.approach == 'fedgan':
+            transform_train = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            ])
 
         transform_test = transforms.Compose([
-            transforms.Resize((240, 240)),
-            transforms.CenterCrop(224),
+            transforms.Resize((128, 128)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        total_train_idxs, train_targets = [], []
-        total_public_idxs, public_targets = [], []
-        for c in range(5):
-            total_train_idxs += train_idxs[c]
-            train_targets += [c for _ in range(len(train_idxs[c]))]
-            total_public_idxs += public_idxs[c]
-            public_targets += [c for _ in range(len(public_idxs[c]))]
-
-        train_dst = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'))
-        val_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'val'), transform=transform_test)
-        test_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'test'), transform=transform_test)
-
-        train_ds = DatasetSplit(dataset=train_dst, idxs=total_train_idxs, transform=transform_train, targets=train_targets)
-        public_ds = DatasetSplit(dataset=train_dst, idxs=total_public_idxs, transform=transform_test, targets=public_targets)
-
-        train_dl = data.DataLoader(dataset=train_ds, batch_size=args.train_bs, drop_last=False, shuffle=True, num_workers=8, prefetch_factor=16*64, pin_memory=True)
-        val_dl = data.DataLoader(dataset=val_ds, batch_size=args.test_bs, shuffle=False, num_workers=8, prefetch_factor=16*64, pin_memory=True)
-        test_dl = data.DataLoader(dataset=test_ds, batch_size=args.test_bs, shuffle=False, num_workers=8, prefetch_factor=16*64, pin_memory=True)
+        train_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        public_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        val_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        test_ds = ImageFolder_custom(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
@@ -1486,10 +1248,7 @@ def get_dataloader(args, request='dataloader'):
             'test': n_test
         }
 
-    if request == 'dataloader':
-        return train_dl, val_dl, test_dl, num_per_class
-    elif request == 'dataset':
-        return train_ds, val_ds, public_ds, test_ds, num_per_class
+    return train_ds, val_ds, public_ds, test_ds, num_per_class
 
 
 def get_prediction_labels(models, n_classes, dataloader, args, gamma=None, method="max_vote", train_cls_counts=None,
@@ -1702,6 +1461,9 @@ if __name__ == '__main__':
     
     args = get_args()
     args.approach = 'FedKT'
+    args.n_classes, args.channel, args.im_size, \
+    args.mean, args.std = get_dataset_info(args.dataset)
+    seed_everything(args.init_seed)
     mkdirs(args.logdir)
     mkdirs(args.modeldir)
     if args.log_file_name is None:
@@ -1743,7 +1505,7 @@ if __name__ == '__main__':
         # X_train, y_train, X_test, y_test, net_dataidx_map, traindata_cls_counts = partition_data(
         #     args.dataset, args.datadir, args.logdir, args.partition, args.n_parties, beta=args.beta, min_require=args.min_require)
 
-        train_ds, val_ds, public_ds, test_ds, n_per_class = get_dataloader(args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, n_per_class = get_dataloader(args)
         party2dataidx = partition(args, train_ds, val_ds)
 
         if args.dataset in {'mnist', 'cifar10'}:

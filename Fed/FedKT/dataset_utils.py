@@ -1,8 +1,7 @@
-from typing import Any, Callable, Optional, Tuple
 import torch.utils.data as data
 import numpy as np
 import torchvision
-from torchvision.datasets import MNIST, CIFAR10, CIFAR100, ImageFolder, default_loader
+from torchvision.datasets import MNIST, CIFAR10, CIFAR100, ImageFolder
 
 class TensorDataset(data.Dataset):
     def __init__(self, images, labels): # images: n x c x h x w tensor

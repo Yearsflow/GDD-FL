@@ -1,4 +1,4 @@
-from utils.common_utils import get_dataloader
+from utils.common_utils import get_dataloader, get_network
 from networks import ResNet18
 import torch
 import os
@@ -9,6 +9,8 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 import torch.nn.functional as F
 import copy
+from torch.utils.data import DataLoader
+import math
 
 class Central(object):
 
@@ -26,34 +28,18 @@ class Central(object):
 
     def run(self):
 
-        if self.args.dataset not in {'isic2020', 'EyePACS'}:
-            train_dl, val_dl, test_dl = get_dataloader(self.args)
-        else:
-            train_dl, val_dl, test_dl, num_per_class = get_dataloader(self.args)
-
-        if self.args.dataset in {'mnist', 'cifar10'}:
-            n_classes = 10
-        elif self.args.dataset == 'cifar100':
-            n_classes = 100
-        elif self.args.dataset == 'isic2020':
-            n_classes = 2
-        elif self.args.dataset == 'EyePACS':
-            n_classes = 5
-        else:
-            raise NotImplementedError('Dataset Not Supported')
-        if self.args.model == 'ResNet18':
-            if self.args.dataset == 'mnist':
-                net = ResNet18(args=self.args, num_classes=n_classes, channel=1)
-            else:
-                net = ResNet18(args=self.args, num_classes=n_classes, channel=3)
+        train_ds, val_ds, public_ds, test_ds, num_per_class = get_dataloader(self.args)
+        train_dl = DataLoader(train_ds, batch_size=self.args.train_bs, shuffle=True, pin_memory=True,
+                              num_workers=8, drop_last=False, prefetch_factor=2*self.args.train_bs)
+        val_dl = DataLoader(val_ds, batch_size=self.args.test_bs, shuffle=False, pin_memory=True,
+                            num_workers=8, drop_last=False, prefetch_factor=2*self.args.test_bs)
+        test_dl = DataLoader(test_ds, batch_size=self.args.test_bs, shuffle=False, pin_memory=True,
+                            num_workers=8, drop_last=False, prefetch_factor=2*self.args.test_bs)
         
-        if self.args.dataset in {'isic2020', 'EyePACS'}:
-            num_ftrs = net.classifier.in_features
-            net.classifier = nn.Linear(num_ftrs * 7 * 7, n_classes)
-
+        net = get_network(self.args)
         if self.args.device != 'cpu':
             net = nn.DataParallel(net)
-        net.to(self.args.device)
+            net.to(self.args.device)
 
         if self.args.dataset not in {'isic2020', 'EyePACS'}:
             losses, accs, w = self.train(net, train_dl, val_dl)
@@ -87,17 +73,14 @@ class Central(object):
 
     def train(self, net, train_dl, val_dl, class_weight=None):
 
-        if self.args.optimizer == 'sgd':
-            optimizer = optim.SGD(net.parameters(), 
-                                lr=self.args.lr, momentum=self.args.momentum, weight_decay=self.args.weight_decay)
+        optimizer = optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.9, weight_decay=1e-5)
         if class_weight is not None:
             criterion = nn.CrossEntropyLoss(weight=torch.from_numpy(np.array(class_weight)).float()).to(self.args.device)
         else:
             criterion = nn.CrossEntropyLoss()
-        if self.args.dataset == 'EyePACS':
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
-        else:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
+        lf = lambda x: ((1 + math.cos(x * math.pi / self.args.epochs)) / 2) * (1 - self.args.lrf) + self.args.lrf
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+        scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
         train_losses, train_accs, train_aucs = [], [], []
         val_losses, val_accs, val_aucs = [], [], []
@@ -115,9 +98,10 @@ class Central(object):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
                 optimizer.zero_grad()
-                out = net(x)
-
-                loss = criterion(out, target)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out = net(x)
+                    loss = criterion(out, target)
+                
                 total += x.data.size()[0]
                 _, pred_label = torch.max(out.data, 1)
                 if self.args.dataset == 'isic2020':
@@ -125,13 +109,16 @@ class Central(object):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 else:
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
                 correct += (pred_label == target.data).sum().item()
-                loss.backward()
-                optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 epoch_loss_collector.append(loss.item())
+
+            scheduler.step()
             
             epoch_train_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
             epoch_train_acc = correct / float(total)
@@ -156,16 +143,17 @@ class Central(object):
                 for batch_idx, (x, target) in enumerate(val_dl):
                     x = x.to(self.args.device, non_blocking=True)
                     target = target.long().to(self.args.device, non_blocking=True)
-                    out = net(x)
-
-                    loss = criterion(out, target)
+                    with torch.cuda.amp.autocast_mode.autocast():
+                        out = net(x)
+                        loss = criterion(out, target)
+                    
                     _, pred_label = torch.max(out.data, 1)
                     if self.args.dataset == 'isic2020':
                         for i in range(len(out)):
                             prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                     else:
                         for i in range(len(out)):
-                            prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                            prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                     targets += target.cpu().tolist()
 
                     epoch_loss_collector.append(loss.item())
@@ -194,11 +182,6 @@ class Central(object):
                 if epoch_val_acc >= best_val_acc:
                     best_val_acc = epoch_val_acc
                     best_model = copy.deepcopy(net.state_dict())
-
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                scheduler.step(epoch_val_auc)
-            else:
-                scheduler.step(epoch_val_acc)
             
             if self.args.dataset in {'isic2020', 'EyePACS'}:
                 self.logger.info('Epoch: %d Train Loss: %f Train AUC: %f Val Loss: %f Val AUC: %f' % (epoch, epoch_train_loss, epoch_train_auc, epoch_val_loss, epoch_val_auc))
@@ -218,14 +201,15 @@ class Central(object):
             for batch_idx, (x, target) in enumerate(test_dl):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
-                out = net(x)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out = net(x)
 
                 if self.args.dataset == 'isic2020':
                     for i in range(len(out)):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 else:
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
 
                 _, pred_label = torch.max(out.data, 1)

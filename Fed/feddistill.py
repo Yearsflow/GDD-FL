@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import copy
 import random
 from .fedavg import FedAvg
-from dataset_utils import TensorDataset
+from utils.dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
 from utils.common_utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
@@ -23,11 +23,11 @@ class FedDistill(FedAvg):
     def extra_parser(extra_args):
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('--ipc', type=int, default=1,
+        parser.add_argument('--ipc', type=int, default=10,
                             help='number of images distilled per class')
         parser.add_argument('--lr_img', type=float, default=1.0, 
                             help='learning rate for updating synthetic images')
-        parser.add_argument('--iter', type=int, default=300,
+        parser.add_argument('--iter', type=int, default=100,
                             help='distilling iterations')
         parser.add_argument('--batch_real', type=int, default=64, 
                             help='batch size for real data')
@@ -49,36 +49,10 @@ class FedDistill(FedAvg):
         elif self.args.approach == 'feddsa':
             self.appr_args.dsa = True
         self.appr_args.outer_loop, self.appr_args.inner_loop = get_loops(self.appr_args.ipc)
-        if self.args.dataset == 'isic2020':
-            self.appr_args.n_classes = 2
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (224, 224)
-            self.appr_args.mean = [0.485, 0.456, 0.406]
-            self.appr_args.std = [0.229, 0.224, 0.225]
-        elif self.args.dataset == 'EyePACS':
-            self.appr_args.n_classes = 5
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (224, 224)
-            self.appr_args.mean = [0.485, 0.456, 0.406]
-            self.appr_args.std = [0.229, 0.224, 0.225]
-        elif self.args.dataset == 'mnist':
-            self.appr_args.n_classes = 10
-            self.appr_args.channel = 1
-            self.appr_args.im_size = (28, 28)
-            self.appr_args.mean = [0.1307]
-            self.appr_args.std = [0.3081]
-        elif self.args.dataset == 'cifar10':
-            self.appr_args.n_classes = 10
-            self.appr_args.channel = 3
-            self.appr_args.im_size = (32, 32)
-            self.appr_args.mean = [x / 255.0 for x in [125.3, 123.0, 113.9]]
-            self.appr_args.std = [x / 255.0 for x in [63.0, 62.1, 66.7]]
-        else:
-            raise NotImplementedError('Dataset Not Supported')
 
         self.logger.info('Partitioning data...')
 
-        train_ds, val_ds, test_ds, num_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, num_per_class = get_dataloader(self.args)
         self.party2dataidx = self.partition(train_ds, val_ds)
 
         self.logger.info('Initialize nets...')
@@ -113,9 +87,9 @@ class FedDistill(FedAvg):
                 train_ds_c = DatasetSplit(train_ds, self.party2dataidx['train'][c_id])
                 val_ds_c = DatasetSplit(val_ds, self.party2dataidx['val'][c_id])
 
-                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=16*self.args.train_bs,
+                train_dl = DataLoader(train_ds_c, num_workers=8, prefetch_factor=2*self.args.train_bs,
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=16*self.args.test_bs,
+                val_dl = DataLoader(val_ds_c, num_workers=8, prefetch_factor=2*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 self.logger.info('Train batches: %d' % len(train_dl))
                 self.logger.info('Val batches: %d' % len(val_dl))
@@ -134,8 +108,8 @@ class FedDistill(FedAvg):
                     self.logger.info('class c = %d: %d real images' % (_, len(indices_class[_])))
 
                 self.logger.info('Initialize synthetic data')
-                image_syn = torch.randn(size=(self.args.n_classes * self.appr_args.ipc, self.appr_args.channel, 
-                                        self.appr_args.im_size[0], self.appr_args.im_size[1]), dtype=torch.float, requires_grad=True)
+                image_syn = torch.randn(size=(self.args.n_classes * self.appr_args.ipc, self.args.channel, 
+                                        self.args.im_size[0], self.args.im_size[1]), dtype=torch.float, requires_grad=True)
                 label_syn = torch.tensor(np.array([np.ones(self.appr_args.ipc)*i for i in range(self.args.n_classes)]),
                                         dtype=torch.long, requires_grad=False).view(-1)
                 if self.appr_args.init == 'real':
@@ -165,7 +139,7 @@ class FedDistill(FedAvg):
                     os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'global_{}_round{}_'.format(self.args.model, round)+self.args.log_file_name+'.pth'))
             
             test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, shuffle=False,
-                                num_workers=8, pin_memory=True, prefetch_factor=16*self.args.test_bs)
+                                num_workers=8, pin_memory=True, prefetch_factor=2*self.args.test_bs)
             
             if self.args.dataset not in {'isic2020', 'EyePACS'}:
                 test_acc = self.eval(global_net, test_dl)
@@ -190,129 +164,13 @@ class FedDistill(FedAvg):
         dst_train = TensorDataset(torch.stack(train_images, dim=0), torch.stack(train_labels, dim=0))
         dst_val = TensorDataset(torch.stack(val_images, dim=0), torch.stack(val_labels, dim=0))
 
-        train_dl = DataLoader(dst_train, num_workers=8, prefetch_factor=16*self.args.train_bs,
+        train_dl = DataLoader(dst_train, num_workers=8, prefetch_factor=2*self.args.train_bs,
                             batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-        val_dl = DataLoader(dst_val, num_workers=8, prefetch_factor=16*self.args.test_bs,
+        val_dl = DataLoader(dst_val, num_workers=8, prefetch_factor=2*self.args.test_bs,
                             batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
 
-        if self.args.optimizer == 'sgd':
-            optimizer = optim.SGD(net.parameters(),
-                                lr=self.args.lr, momentum=self.args.momentum, weight_decay=self.args.weight_decay)
-        criterion = nn.CrossEntropyLoss()
-        if self.args.dataset == 'EyePACS':
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
-        else:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
-
-        train_losses, train_accs, train_aucs = [], [], []
-        val_losses, val_accs, val_aucs = [], [], []
-
-        best_val_acc, best_val_auc, best_model = 0, 0, None
-
-        for epoch in range(self.args.epochs):
-            epoch_loss_collector = []
-            total, correct = 0, 0
-
-            prob, targets = [], []
-
-            net.train()
-            
-            for batch_idx, (x, target) in enumerate(train_dl):
-                
-                x = x.to(self.args.device, non_blocking=True)
-                target = target.long().to(self.args.device, non_blocking=True)
-                optimizer.zero_grad()
-                out = net(x)
-
-                loss = criterion(out, target)
-                total += x.data.size()[0]
-                _, pred_label = torch.max(out.data, 1)
-                if self.args.dataset == 'isic2020':
-                    for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
-                elif self.args.dataset == 'EyePACS':
-                    for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
-                targets += target.cpu().tolist()
-                correct += (pred_label == target.data).sum().item()
-                loss.backward()
-                optimizer.step()
-
-                epoch_loss_collector.append(loss.item())
-            
-            epoch_train_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            epoch_train_acc = correct / float(total)
-            if self.args.dataset == 'isic2020':
-                epoch_train_auc = roc_auc_score(np.array(targets), np.array(prob))
-                train_aucs.append(epoch_train_auc)
-            elif self.args.dataset == 'EyePACS':
-                epoch_train_auc = roc_auc_score(np.array(targets), np.array(prob), multi_class='ovo', labels=[0, 1, 2, 3, 4])
-                train_aucs.append(epoch_train_auc)
-
-            train_losses.append(epoch_train_loss)
-            train_accs.append(epoch_train_acc)
-            
-            epoch_loss_collector = []
-            total, correct = 0, 0
-            
-            prob, targets = [], []
-            net.eval()
-
-            with torch.no_grad():
-                for batch_idx, (x, target) in enumerate(val_dl):
-                    
-                    x = x.to(self.args.device, non_blocking=True)
-                    target = target.long().to(self.args.device, non_blocking=True)
-                    out = net(x)
-
-                    loss = criterion(out, target)
-                    _, pred_label = torch.max(out.data, 1)
-                    if self.args.dataset == 'isic2020':
-                        for i in range(len(out)):
-                            prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
-                    elif self.args.dataset == 'EyePACS':
-                        for i in range(len(out)):
-                            prob.append(F.softmax(out[i], dim=0).cpu().tolist())
-                    targets += target.cpu().tolist()
-
-                    epoch_loss_collector.append(loss.item())
-                    total += x.data.size()[0]
-                    correct += (pred_label == target.data).sum().item()
-
-            current_w = copy.deepcopy(net.state_dict())
-
-            epoch_val_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
-            epoch_val_acc = correct / float(total)
-            if self.args.dataset == 'isic2020':
-                epoch_val_auc = roc_auc_score(np.array(targets), np.array(prob))
-                val_aucs.append(epoch_val_auc)
-            elif self.args.dataset == 'EyePACS':
-                epoch_val_auc = roc_auc_score(np.array(targets), np.array(prob), multi_class='ovo', labels=[0, 1, 2, 3, 4])
-                val_aucs.append(epoch_val_auc)
-
-            val_losses.append(epoch_val_loss)
-            val_accs.append(epoch_val_acc) 
-
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                scheduler.step(epoch_val_auc)
-            else:
-                scheduler.step(epoch_val_acc)      
-
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                if epoch_val_auc >= best_val_auc:
-                    best_val_auc = epoch_val_auc
-                    best_model = current_w
-            else:
-                if epoch_val_acc >= best_val_acc:
-                    best_val_acc = epoch_val_acc
-                    best_model = current_w
-            
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                self.logger.info('Epoch: %d Train Loss: %f Train AUC: %f Val Loss: %f Val AUC: %f' % (epoch, epoch_train_loss, epoch_train_auc, epoch_val_loss, epoch_val_auc))
-            else:
-                self.logger.info('Epoch: %d Train Loss: %f Train Acc: %f Val Loss: %f Val Acc: %f' % (epoch, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc))
-
-        return best_model
+        losses, accs, w = self.train(net, train_dl, val_dl)
+        return w
 
     def get_images(self, c, n, indices_class, train_ds):
 
@@ -367,7 +225,7 @@ class FedDistill(FedAvg):
 
                     img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
                     lab_real = torch.ones((img_real.shape[0],), device=self.args.device, dtype=torch.long) * c
-                    img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.appr_args.channel, self.appr_args.im_size[0], self.appr_args.im_size[1]))
+                    img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.args.channel, self.args.im_size[0], self.args.im_size[1]))
                     lab_syn = torch.ones((self.appr_args.ipc,), device=self.args.device, dtype=torch.long) * c
 
                     if self.appr_args.dsa:
@@ -449,7 +307,7 @@ class FedDistill(FedAvg):
                     continue
 
                 img_real = self.get_images(c, self.appr_args.batch_real, indices_class, train_ds)
-                img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.appr_args.channel, self.appr_args.im_size[0], self.appr_args.im_size[1]))
+                img_syn = image_syn[c*self.appr_args.ipc: (c+1)*self.appr_args.ipc].reshape((self.appr_args.ipc, self.args.channel, self.args.im_size[0], self.args.im_size[1]))
 
                 if self.appr_args.dsa:
                     seed = 42
@@ -518,8 +376,8 @@ class FedDistill(FedAvg):
                     x = augment(x, self.appr_args.dc_aug_param, device=self.args.device)
             target = target.long().to(self.args.device, non_blocking=True)
             out = net(x)
-
             loss = criterion(out, target)
+            
             total += x.data.size()[0]
             _, pred_label = torch.max(out.data, 1)
             if self.args.dataset == 'isic2020':

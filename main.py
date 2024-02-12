@@ -34,6 +34,9 @@ if __name__ == '__main__':
             from Fed.feddream import FedDream as alg
         elif args.approach == 'ours':
             from Fed.ours import Ours as alg
+        elif args.approach == 'fedl2d':
+            # from Fed.fedl2d import FedL2D as alg
+            from Fed.fedl2d_data import FedL2D as alg
         else:
             raise NotImplementedError('Approach Not Implemented')
     elif args.mode == 'UpperBound':

@@ -11,6 +11,7 @@ import copy
 import random
 import torch.nn.functional as F
 from networks import ResNet18
+import math
 
 class FedAvg(object):
 
@@ -130,7 +131,7 @@ class FedAvg(object):
 
         self.logger.info('Partitioning data...')
 
-        train_ds, val_ds, test_ds, n_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, n_per_class = get_dataloader(self.args)
         self.party2dataidx = self.partition(train_ds, val_ds)
 
         self.party2datacounts = {}
@@ -165,9 +166,9 @@ class FedAvg(object):
             for c_id in party_list_this_round:
                 self.logger.info('Client %d' % c_id)
 
-                train_dl = DataLoader(DatasetSplit(train_ds, self.party2dataidx['train'][c_id]), num_workers=8, prefetch_factor=16*self.args.train_bs,
+                train_dl = DataLoader(DatasetSplit(train_ds, self.party2dataidx['train'][c_id]), num_workers=8, prefetch_factor=2*self.args.train_bs,
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                val_dl = DataLoader(DatasetSplit(val_ds, self.party2dataidx['val'][c_id]), num_workers=8, prefetch_factor=16*self.args.test_bs,
+                val_dl = DataLoader(DatasetSplit(val_ds, self.party2dataidx['val'][c_id]), num_workers=8, prefetch_factor=2*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 self.logger.info('Train batches: %d' % len(train_dl))
                 self.logger.info('Val batches: %d' % len(val_dl))
@@ -222,7 +223,7 @@ class FedAvg(object):
                     os.path.join(self.args.ckptdir, self.args.mode, self.args.approach, 'global_{}_round{}_'.format(self.args.model, round)+self.args.log_file_name+'.pth'))
 
             test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, shuffle=False,
-                                num_workers=8, pin_memory=True, prefetch_factor=16*self.args.test_bs)
+                                num_workers=8, pin_memory=True, prefetch_factor=2*self.args.test_bs)
 
             if self.args.dataset not in {'isic2020', 'EyePACS'}:
                 test_acc = self.eval(global_net, test_dl)
@@ -233,18 +234,15 @@ class FedAvg(object):
 
     def train(self, net, train_dl, val_dl, class_weight=None):
 
-        if self.args.optimizer == 'sgd':
-            optimizer = optim.SGD(net.parameters(),
-                                lr=self.args.lr, momentum=self.args.momentum, weight_decay=self.args.weight_decay)
+        optimizer = optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.9, weight_decay=1e-5)
         
         if class_weight is not None:
             criterion = nn.CrossEntropyLoss(weight=torch.from_numpy(np.array(class_weight)).float()).to(self.args.device)
         else:
             criterion = nn.CrossEntropyLoss()
-        if self.args.dataset != 'EyePACS':
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
-        else:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
+        lf = lambda x: ((1 + math.cos(x * math.pi / self.args.epochs)) / 2) * (1 - self.args.lrf) + self.args.lrf
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+        scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
         train_losses, train_accs, train_aucs = [], [], []
         val_losses, val_accs, val_aucs = [], [], []
@@ -263,24 +261,27 @@ class FedAvg(object):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
                 optimizer.zero_grad()
-                out = net(x)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out = net(x)
+                    loss = criterion(out, target)
 
-                loss = criterion(out, target)
                 total += x.data.size()[0]
                 _, pred_label = torch.max(out.data, 1)
-                pred_label = pred_label.cpu()
                 if self.args.dataset == 'isic2020':
                     for i in range(len(out)):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 elif self.args.dataset == 'EyePACS':
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
-                correct += (pred_label == target.data.cpu()).sum().item()
-                loss.backward()
-                optimizer.step()
+                correct += (pred_label == target.data).sum().item()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 epoch_loss_collector.append(loss.item())
+
+            scheduler.step()
             
             epoch_train_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
             epoch_train_acc = correct / float(total)
@@ -305,22 +306,22 @@ class FedAvg(object):
                     
                     x = x.to(self.args.device, non_blocking=True)
                     target = target.long().to(self.args.device, non_blocking=True)
-                    out = net(x)
-
-                    loss = criterion(out, target)
+                    with torch.cuda.amp.autocast_mode.autocast():
+                        out = net(x)
+                        loss = criterion(out, target)
+                    
                     _, pred_label = torch.max(out.data, 1)
-                    pred_label = pred_label.cpu()
                     if self.args.dataset == 'isic2020':
                         for i in range(len(out)):
                             prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                     elif self.args.dataset == 'EyePACS':
                         for i in range(len(out)):
-                            prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                            prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                     targets += target.cpu().tolist()
 
                     epoch_loss_collector.append(loss.item())
                     total += x.data.size()[0]
-                    correct += (pred_label == target.data.cpu()).sum().item()
+                    correct += (pred_label == target.data).sum().item()
 
             epoch_val_loss = sum(epoch_loss_collector) / len(epoch_loss_collector)
             epoch_val_acc = correct / float(total)
@@ -334,12 +335,7 @@ class FedAvg(object):
             current_w = copy.deepcopy(net.state_dict())
 
             val_losses.append(epoch_val_loss)
-            val_accs.append(epoch_val_acc) 
-
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                scheduler.step(epoch_val_auc)
-            else:
-                scheduler.step(epoch_val_acc)      
+            val_accs.append(epoch_val_acc)     
 
             if self.args.dataset in {'isic2020', 'EyePACS'}:
                 if epoch_val_auc >= best_val_auc:
@@ -368,20 +364,20 @@ class FedAvg(object):
             for batch_idx, (x, target) in enumerate(test_dl):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
-                out = net(x)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out = net(x)
 
                 if self.args.dataset == 'isic2020':
                     for i in range(len(out)):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 elif self.args.dataset == 'EyePACS':
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
 
                 _, pred_label = torch.max(out.data, 1)
-                pred_label = pred_label.cpu()
                 total += x.data.size()[0]
-                correct += (pred_label == target.data.cpu()).sum().item()
+                correct += (pred_label == target.data).sum().item()
 
         test_acc = correct / float(total)
         if self.args.dataset == 'isic2020':

@@ -1,4 +1,4 @@
-from utils.common_utils import get_dataloader, DatasetSplit
+from utils.common_utils import get_dataloader, DatasetSplit, get_network
 from networks import ResNet18
 import torch
 import os
@@ -23,10 +23,7 @@ class RS(Central):
     
     def run(self):
 
-        if self.args.dataset not in {'isic2020', 'EyePACS'}:
-            train_ds, val_ds, test_ds = get_dataloader(self.args, request='dataset')
-        else:
-            train_ds, val_ds, test_ds, n_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, n_per_class = get_dataloader(self.args)
 
         if self.args.dataset in {'mnist', 'cifar10'}:
             n_classes = 10
@@ -46,23 +43,14 @@ class RS(Central):
             if num_per_class[targets[i]] < self.appr_args.n_per_class:
                 num_per_class[targets[i]] += 1
                 dataidxs.append(i)
-        train_dl = DataLoader(DatasetSplit(train_ds, dataidxs), num_workers=8, shuffle=True, prefetch_factor=16*64,
+        train_dl = DataLoader(DatasetSplit(train_ds, dataidxs), num_workers=8, shuffle=True, prefetch_factor=2*64,
                             batch_size=self.args.train_bs, drop_last=False, pin_memory=True)
         val_dl = DataLoader(dataset=val_ds, batch_size=self.args.test_bs, num_workers=8, 
-                            prefetch_factor=16*64, shuffle=False, pin_memory=True)
+                            prefetch_factor=2*64, shuffle=False, pin_memory=True)
         test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, num_workers=8,
-                            prefetch_factor=16*64, shuffle=False, pin_memory=True)
+                            prefetch_factor=2*64, shuffle=False, pin_memory=True)
 
-        if self.args.model == 'ResNet18':
-            if self.args.dataset == 'mnist':
-                net = ResNet18(args=self.args, num_classes=n_classes, channel=1)
-            else:
-                net = ResNet18(args=self.args, num_classes=n_classes, channel=3)
-        
-        if self.args.dataset in {'isic2020', 'EyePACS'}:
-            num_ftrs = net.classifier.in_features
-            net.classifier = nn.Linear(num_ftrs * 7 * 7, n_classes)
-
+        net = get_network(self.args)
         if self.args.device != 'cpu':
             net = nn.DataParallel(net)
         net.to(self.args.device)

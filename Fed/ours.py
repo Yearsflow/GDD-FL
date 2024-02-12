@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import copy
 import random
 from .feddistill import FedDistill
-from dataset_utils import TensorDataset
+from utils.dataset_utils import TensorDataset
 import torch.nn.functional as F
 from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug
 

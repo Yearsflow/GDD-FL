@@ -1,4 +1,4 @@
-from dataset_utils import MNIST_truncated
+from utils.dataset_utils import MNIST_truncated
 from torch.utils.data import DataLoader
 
 a = MNIST_truncated(root='./data')

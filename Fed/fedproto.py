@@ -11,6 +11,7 @@ import random
 from .fedavg import FedAvg
 from utils.common_utils import get_dataloader, DatasetSplit, get_network
 import torch.nn.functional as F
+import math
 
 class FedProto(FedAvg):
 
@@ -21,7 +22,7 @@ class FedProto(FedAvg):
 
         self.logger.info('Partitioning data...')
 
-        train_ds, val_ds, test_ds, num_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, num_per_class = get_dataloader(self.args)
         self.party2dataidx = self.partition(train_ds, val_ds)
 
         self.logger.info('Initialize nets...')
@@ -45,9 +46,9 @@ class FedProto(FedAvg):
 
                 self.logger.info('Client %d' % c)
 
-                train_dl = DataLoader(DatasetSplit(train_ds, self.party2dataidx['train'][c]), num_workers=8, prefetch_factor=16*self.args.train_bs,
+                train_dl = DataLoader(DatasetSplit(train_ds, self.party2dataidx['train'][c]), num_workers=8, prefetch_factor=2*self.args.train_bs,
                                     batch_size=self.args.train_bs, shuffle=True, drop_last=False, pin_memory=True)
-                val_dl = DataLoader(DatasetSplit(val_ds, self.party2dataidx['val'][c]), num_workers=8, prefetch_factor=16*self.args.test_bs,
+                val_dl = DataLoader(DatasetSplit(val_ds, self.party2dataidx['val'][c]), num_workers=8, prefetch_factor=2*self.args.test_bs,
                                     batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
             
                 self.logger.info('Train batches: %d' % len(train_dl))
@@ -98,7 +99,7 @@ class FedProto(FedAvg):
             global_proto = self.proto_aggregation(local_protos)
 
             test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, shuffle=False,
-                                num_workers=8, pin_memory=True, prefetch_factor=16*self.args.test_bs)
+                                num_workers=8, pin_memory=True, prefetch_factor=2*self.args.test_bs)
 
             local_model_wo_metrics, local_model_w_metrics = [], []
 
@@ -122,19 +123,16 @@ class FedProto(FedAvg):
             
     def train(self, net, train_dl, val_dl, class_weight=None):
 
-        if self.args.optimizer == 'sgd':
-            optimizer = optim.SGD(net.parameters(),
-                                lr=self.args.lr, momentum=self.args.momentum, weight_decay=self.args.weight_decay)
+        optimizer = optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.9, weight_decay=1e-5)
         
         if class_weight is not None:
             criterion = nn.CrossEntropyLoss(weight=torch.from_numpy(np.array(class_weight)).float()).to(self.args.device)
         else:
             criterion = nn.CrossEntropyLoss()
 
-        if self.args.dataset != 'EyePACS':
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
-        else:
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=10, verbose=True)
+        lf = lambda x: ((1 + math.cos(x * math.pi / self.args.epochs)) / 2) * (1 - self.args.lrf) + self.args.lrf
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+        scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
         train_losses, train_accs, train_aucs = [], [], []
         val_losses, val_accs, val_aucs = [], [], []
@@ -154,10 +152,11 @@ class FedProto(FedAvg):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
                 optimizer.zero_grad()
-                out, protos = net(x)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out, protos = net(x)
+                    loss = criterion(out, target)
+                
                 protos = protos.to('cpu')
-
-                loss = criterion(out, target)
                 total += x.data.size()[0]
                 _, pred_label = torch.max(out.data, 1)
                 if self.args.dataset == 'isic2020':
@@ -165,11 +164,12 @@ class FedProto(FedAvg):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 elif self.args.dataset == 'EyePACS':
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
                 correct += (pred_label == target.data).sum().item()
-                loss.backward()
-                optimizer.step()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 for i in range(len(target)):
                     if target[i].item() in agg_protos_label:
@@ -201,17 +201,18 @@ class FedProto(FedAvg):
                 for batch_idx, (x, target) in enumerate(val_dl):
                     x = x.to(self.args.device, non_blocking=True)
                     target = target.long().to(self.args.device, non_blocking=True)
-                    out, protos = net(x)
+                    with torch.cuda.amp.autocast_mode.autocast():
+                        out, protos = net(x)
+                        loss = criterion(out, target)
+                    
                     protos = protos.to('cpu')
-
-                    loss = criterion(out, target)
                     _, pred_label = torch.max(out.data, 1)
                     if self.args.dataset == 'isic2020':
                         for i in range(len(out)):
                             prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                     elif self.args.dataset == 'EyePACS':
                         for i in range(len(out)):
-                            prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                            prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                     targets += target.cpu().tolist()
 
                     epoch_loss_collector.append(loss.item())
@@ -232,10 +233,7 @@ class FedProto(FedAvg):
             val_losses.append(epoch_val_loss)
             val_accs.append(epoch_val_acc) 
 
-            if self.args.dataset in {'isic2020', 'EyePACS'}:
-                scheduler.step(epoch_val_auc)
-            else:
-                scheduler.step(epoch_val_acc)      
+            scheduler.step()    
 
             if self.args.dataset in {'isic2020', 'EyePACS'}:
                 if epoch_val_auc >= best_val_auc:
@@ -306,6 +304,7 @@ class FedProto(FedAvg):
         total, correct = 0, 0
         prob, targets = [], []
         loss_mse = nn.MSELoss()
+        scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
         net.eval()
 
@@ -313,7 +312,8 @@ class FedProto(FedAvg):
             for batch_idx, (x, target) in enumerate(test_dl):
                 x = x.to(self.args.device, non_blocking=True)
                 target = target.long().to(self.args.device, non_blocking=True)
-                out, proto = net(x)
+                with torch.cuda.amp.autocast_mode.autocast():
+                    out, proto = net(x)
                 proto = proto.to('cpu')
 
                 if self.args.dataset == 'isic2020':
@@ -321,7 +321,7 @@ class FedProto(FedAvg):
                         prob.append(F.softmax(out[i], dim=0).cpu().tolist()[1])
                 elif self.args.dataset == 'EyePACS':
                     for i in range(len(out)):
-                        prob.append(F.softmax(out[i], dim=0).cpu().tolist())
+                        prob.append(F.softmax(out[i].double(), dim=0).cpu().tolist())
                 targets += target.cpu().tolist()
 
                 _, pred_label = torch.max(out.data, 1)
@@ -343,7 +343,8 @@ class FedProto(FedAvg):
                 for batch_idx, (x, target) in enumerate(test_dl):
                     x = x.to(self.args.device, non_blocking=True)
                     target = target.long().to(self.args.device, non_blocking=True)
-                    out, proto = net(x)
+                    with torch.cuda.amp.autocast_mode.autocast():
+                        out, proto = net(x)
                     proto = proto.to('cpu')
 
                     # compute the dist between protos and global_protos

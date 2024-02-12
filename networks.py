@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+from utils.fedl2d_utils import reparametrize
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -79,7 +80,7 @@ class ResNet(nn.Module):
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
@@ -87,8 +88,12 @@ class ResNet(nn.Module):
         out = self.layer4(out)
         out = F.avg_pool2d(out, 4)
         out = out.view(out.size(0), -1)
-        out = self.classifier(out)
-        return out
+        logit = self.classifier(out)
+        
+        if return_features:
+            return logit, out
+        else:
+            return logit
 
     def embed(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
@@ -114,10 +119,51 @@ class ResNetProto(ResNet):
         out = out.view(out.size(0), -1)
         out = self.classifier(out)
         return out, x1
+    
+class ResNetL2D(ResNet):
+    def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm', dataset='mnist'):
+        super(ResNetL2D, self).__init__(block, num_blocks, channel, num_classes, norm)
+        if dataset in ['isic2020', 'EyePACS']:
+            self.p_logvar = nn.Sequential(nn.Linear(512 * 4 * 4, 512),
+                                          nn.ReLU())
+            self.p_mu = nn.Sequential(nn.Linear(512 * 4 * 4, 512),
+                                      nn.LeakyReLU())
+        else:
+            self.p_logvar = nn.Sequential(nn.Linear(512 * block.expansion, 512),
+                                        nn.ReLU())
+            self.p_mu = nn.Sequential(nn.Linear(512 * block.expansion, 512),
+                                    nn.LeakyReLU())
+
+    def forward(self, x, train=True):
+        end_points = {}
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = F.avg_pool2d(out, 4)
+        out = out.view(out.size(0), -1)
+
+        logvar = self.p_logvar(out)
+        mu = self.p_mu(out)
+        end_points['logvar'] = logvar
+        end_points['mu'] = mu
+
+        if train:
+            out = reparametrize(mu, logvar)
+        else:
+            out = mu
+        end_points['Embedding'] = out
+        out = self.classifier(out)
+        end_points['Predictions'] = F.softmax(input=out, dim=-1)
+
+        return out, end_points
 
 def ResNet18(args, channel, num_classes, norm='instancenorm'):
     if args.approach == 'fedproto':
         return ResNetProto(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
+    elif args.approach == 'fedl2d':
+        return ResNetL2D(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, dataset=args.dataset)
     return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
 
 def ResNet34(channel, num_classes):
@@ -138,8 +184,8 @@ class ConvNet(nn.Module):
         super(ConvNet, self).__init__()
 
         self.features, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size)
-        num_feat = shape_feat[0]*shape_feat[1]*shape_feat[2]
-        self.classifier = nn.Linear(num_feat, num_classes)
+        self.num_feat = shape_feat[0]*shape_feat[1]*shape_feat[2]
+        self.classifier = nn.Linear(self.num_feat, num_classes)
 
     def forward(self, x):
         out = self.features(x)
@@ -206,7 +252,42 @@ class ConvNet(nn.Module):
                 shape_feat[2] //= 2
 
         return nn.Sequential(*layers), shape_feat
-    
+
+class ConvNetL2D(ConvNet):
+    def __init__(self, channel, num_classes, net_width, net_depth, net_act, net_norm, net_pooling, im_size=(32, 32)):
+        super(ConvNetL2D, self).__init__(channel, num_classes, net_width, net_depth, net_act, net_norm, net_pooling, im_size)
+        if im_size[0] == 224:
+            self.p_logvar = nn.Sequential(nn.Linear(self.num_feat * 4 * 4, self.num_feat),
+                                          nn.ReLU())
+            self.p_mu = nn.Sequential(nn.Linear(self.num_feat * 4 * 4, self.num_feat),
+                                      nn.LeakyReLU())
+        else:
+            self.p_logvar = nn.Sequential(nn.Linear(self.num_feat, self.num_feat),
+                                        nn.ReLU())
+            self.p_mu = nn.Sequential(nn.Linear(self.num_feat, self.num_feat),
+                                    nn.LeakyReLU())
+
+    def forward(self, x, train=True):
+        end_points = {}
+        out = self.features(x)
+        out = out.view(out.size(0), -1)
+
+        logvar = self.p_logvar(out)
+        mu = self.p_mu(out)
+        end_points['logvar'] = logvar
+        end_points['mu'] = mu
+
+        if train:
+            out = reparametrize(mu, logvar)
+        else:
+            out = mu
+        end_points['Embedding'] = out
+        out = self.classifier(out)
+        end_points['Predictions'] = F.softmax(input=out, dim=-1)
+
+        return out, end_points
+
+
 class Discriminator(nn.Module):
 
     def __init__(self, args):
@@ -221,7 +302,7 @@ class Discriminator(nn.Module):
             if args.dataset == 'cifar10':
                 size = 32
             else:
-                size = 224
+                size = 128
         self.ln1 = nn.LayerNorm(normalized_shape=[196, size, size])
         self.lrelu1 = nn.LeakyReLU()
 
@@ -255,9 +336,9 @@ class Discriminator(nn.Module):
             self.fc1 = nn.Linear(196, 1)
             self.fc10 = nn.Linear(196, 10)
         else:
-            self.ln8 = nn.LayerNorm(normalized_shape=[196, 28, 28])
-            self.fc1 = nn.Linear(196*7*7, 1)
-            self.fc10 = nn.Linear(196*7*7, 10)
+            self.ln8 = nn.LayerNorm(normalized_shape=[196, 16, 16])
+            self.fc1 = nn.Linear(196*4*4, 1)
+            self.fc10 = nn.Linear(196*4*4, 10)
         self.lrelu8 = nn.LeakyReLU()
 
         self.pool = nn.MaxPool2d(kernel_size=4, stride=4, padding=0)
@@ -351,8 +432,8 @@ class Generator(nn.Module):
             self.fc1 = nn.Linear(100, 196*4*4)
             self.bn0 = nn.BatchNorm1d(196*4*4)
         else:
-            self.fc1 = nn.Linear(100, 196*28*28)
-            self.bn0 = nn.BatchNorm1d(196*28*28)
+            self.fc1 = nn.Linear(100, 196*16*16)
+            self.bn0 = nn.BatchNorm1d(196*16*16)
         self.relu0 = nn.ReLU()
 
         if args.dataset == 'mnist':
@@ -411,7 +492,7 @@ class Generator(nn.Module):
         if self.args.dataset in ['mnist', 'cifar10']:
             x = x.view(-1, 196, 4, 4)
         else:
-            x = x.view(-1, 196, 28, 28)
+            x = x.view(-1, 196, 16, 16)
 
         if print_size:
             print(x.size())
@@ -477,30 +558,30 @@ class Generator(nn.Module):
             print("output (tanh) size: {}".format(x.size()))
 
         return x
-    
+
 class AugNet(nn.Module):
-    def __init__(self, noise_lv):
+    def __init__(self, size=224):
         super(AugNet, self).__init__()
         ############# Trainable Parameters
         self.noise_lv = nn.Parameter(torch.zeros(1))
-        self.shift_var = nn.Parameter(torch.empty(3,216,216))
+        self.shift_var = nn.Parameter(torch.empty(3, size - 8, size - 8))
         nn.init.normal_(self.shift_var, 1, 0.1)
-        self.shift_mean = nn.Parameter(torch.zeros(3, 216, 216))
+        self.shift_mean = nn.Parameter(torch.zeros(3, size - 8, size - 8))
         nn.init.normal_(self.shift_mean, 0, 0.1)
 
-        self.shift_var2 = nn.Parameter(torch.empty(3, 212, 212))
+        self.shift_var2 = nn.Parameter(torch.empty(3, size - 12, size - 12))
         nn.init.normal_(self.shift_var2, 1, 0.1)
-        self.shift_mean2 = nn.Parameter(torch.zeros(3, 212, 212))
+        self.shift_mean2 = nn.Parameter(torch.zeros(3, size - 12, size - 12))
         nn.init.normal_(self.shift_mean2, 0, 0.1)
 
-        self.shift_var3 = nn.Parameter(torch.empty(3, 208, 208))
+        self.shift_var3 = nn.Parameter(torch.empty(3, size - 16, size - 16))
         nn.init.normal_(self.shift_var3, 1, 0.1)
-        self.shift_mean3 = nn.Parameter(torch.zeros(3, 208, 208))
+        self.shift_mean3 = nn.Parameter(torch.zeros(3, size - 16, size - 16))
         nn.init.normal_(self.shift_mean3, 0, 0.1)
 
-        self.shift_var4 = nn.Parameter(torch.empty(3, 220, 220))
+        self.shift_var4 = nn.Parameter(torch.empty(3, size - 4, size - 4))
         nn.init.normal_(self.shift_var4, 1, 0.1)
-        self.shift_mean4 = nn.Parameter(torch.zeros(3, 220, 220))
+        self.shift_mean4 = nn.Parameter(torch.zeros(3, size - 4, size - 4))
         nn.init.normal_(self.shift_mean4, 0, 0.1)
 
         # self.shift_var5 = nn.Parameter(torch.empty(3, 206, 206))

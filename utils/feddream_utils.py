@@ -87,12 +87,13 @@ class ClassDataLoader(MultiEpochsDataLoader):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        if args.dst_name in ['mnist', 'cifar10']:
-            self.nclass = 10
-        elif args.dst_name == 'isic2020':
-            self.nclass = 2
-        elif args.dst_name == 'EyePACS':
-            self.nclass = 5
+        # if dst_name in ['mnist', 'cifar10']:
+        #     self.nclass = 10
+        # elif dst_name == 'isic2020':
+        #     self.nclass = 2
+        # elif dst_name == 'EyePACS':
+        #     self.nclass = 5
+        self.nclass = 5
         self.cls_idx = [[] for _ in range(self.nclass)]
         for i in range(len(self.dataset)):
             self.cls_idx[self.dataset.targets[i]].append(i)

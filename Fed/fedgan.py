@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import copy
 import random
 from .feddistill import FedDistill
-from dataset_utils import TensorDataset
+from utils.dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
 from utils.common_utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
@@ -44,13 +44,13 @@ class FedGAN(FedDistill):
                             help='weight decay for optimizer in validation step')
         parser.add_argument('--GAN_lr', type=float, default=1e-4,
                             help='learning rate for training GAN')
-        parser.add_argument('--GAN_epochs', type=int, default=300,
+        parser.add_argument('--GAN_epochs', type=int, default=100,
                             help='number of epochs for training GAN')
         parser.add_argument('--GAN_bs', type=int, default=64,
                             help='batch size for training GAN')
         parser.add_argument('--dim', type=int, default=100,
                             help='number of noise dimension')
-        parser.add_argument('--ipc', type=int, default=1,
+        parser.add_argument('--ipc', type=int, default=10,
                             help='number of distilled images')
 
         return parser.parse_args(extra_args)
@@ -294,7 +294,7 @@ class FedGAN(FedDistill):
         
         self.logger.info('Partitioning data...')
 
-        train_ds, val_ds, test_ds, num_per_class = get_dataloader(self.args, request='dataset')
+        train_ds, val_ds, public_ds, test_ds, num_per_class = get_dataloader(self.args)
         self.party2dataidx = self.partition(train_ds, val_ds)
 
         self.logger.info('Training begins...')
@@ -361,7 +361,7 @@ class FedGAN(FedDistill):
 
             self.logger.info('Evaluate on test dataset')
             test_dl = DataLoader(dataset=test_ds, batch_size=self.args.test_bs, shuffle=False,
-                                num_workers=8, pin_memory=True, prefetch_factor=16*self.args.test_bs)
+                                num_workers=8, pin_memory=True, prefetch_factor=2*self.args.test_bs)
             
             if self.args.dataset in ['isic2020', 'EyePACS']:
                 test_auc = self.eval(global_net, test_dl)

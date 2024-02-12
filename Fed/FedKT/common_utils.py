@@ -2,7 +2,7 @@ import random
 import os
 import numpy as np
 import torch
-from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit
+from dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit
 from torchvision import transforms, datasets
 from networks import ResNet18, ConvNet, ConvNetL2D
 import torch.nn as nn
