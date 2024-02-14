@@ -2,6 +2,31 @@ import torch.utils.data as data
 import numpy as np
 import torchvision
 from torchvision.datasets import MNIST, CIFAR10, CIFAR100
+from torchvision.datasets import DatasetFolder
+from torchvision.datasets.folder import default_loader, IMG_EXTENSIONS
+import cv2
+
+class ImageFolder_A(DatasetFolder):
+    
+    def __init__(self, root: str, transform = None, target_transform = None,
+                loader = default_loader, is_valid_file = None):
+        super(ImageFolder_A, self).__init__(root, loader, IMG_EXTENSIONS if is_valid_file is None else None, 
+                                            transform = transform, 
+                                            target_transform = target_transform, 
+                                            is_valid_file = is_valid_file)
+        self.imgs = self.samples
+
+    def __getitem__(self, index: int):
+
+        path, target = self.samples[index]
+        sample = cv2.imread(path)
+        sample = cv2.cvtColor(sample, cv2.COLOR_BGR2RGB)
+        if self.transform is not None:
+            sample = self.transform(image=sample)['image']
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return sample, target
 
 class TensorDataset(data.Dataset):
     def __init__(self, images, labels): # images: n x c x h x w tensor

@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit
+from utils.dataset_utils import ImageFolder_A
 from torchvision import datasets
 import albumentations as A
 from albumentations.pytorch import ToTensorV2 
@@ -160,10 +161,10 @@ def get_dataloader(args):
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
-        val_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'val'), transform=transform_test)
-        public_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'public'), transform=transform_test)
-        test_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'test'), transform=transform_test)
+        train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        val_ds = ImageFolder_A(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        public_ds = ImageFolder_A(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        test_ds = ImageFolder_A(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
@@ -197,10 +198,10 @@ def get_dataloader(args):
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
-        public_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'public'), transform=transform_test)
-        val_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'val'), transform=transform_test)
-        test_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'test'), transform=transform_test)
+        train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        public_ds = ImageFolder_A(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        val_ds = ImageFolder_A(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        test_ds = ImageFolder_A(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
