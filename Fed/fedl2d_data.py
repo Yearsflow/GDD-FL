@@ -15,6 +15,7 @@ from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAu
 from networks import AugNet, ConvNet, ResNet
 import albumentations as A
 from utils.fedl2d_contrastive_loss import SupConLoss
+from torchvision import transforms
 from utils.fedl2d_utils import loglikeli, club, conditional_mmd_rbf
 import math
 
@@ -72,7 +73,7 @@ class FedL2D(FedDistill):
         optimizer_aug = optim.SGD(extractor.parameters(), lr=self.appr_args.aug_lr, nesterov=True, 
                                   momentum=0.9, weight_decay=5e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * 0.8))
-        transform = A.Normalize(mean=self.args.mean, std=self.args.std)
+        transform = transforms.Normalize(mean=self.args.mean, std=self.args.std)
         con_loss = SupConLoss()
 
         self.logger.info('Learning to diversify')
