@@ -144,21 +144,21 @@ def get_dataloader(args):
 
         transform_train = A.Compose([
             A.Resize(128, 128),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         if args.approach == 'fedgan':
             transform_train = A.Compose([
                 A.Resize(128, 128),
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
                 ToTensorV2(),
-                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
         transform_test = A.Compose([
             A.Resize(128, 128),
-            ToTensorV2(),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
         ])
 
         train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
@@ -181,21 +181,21 @@ def get_dataloader(args):
 
         transform_train = A.Compose([
             A.Resize(128, 128),
-            ToTensorV2(),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
         ])
 
         if args.approach == 'fedgan':
             transform_train = A.Compose([
                 A.Resize(128, 128),
-                ToTensorV2(),
-                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+                ToTensorV2()
             ])
 
         transform_test = A.Compose([
             A.Resize(128, 128),
-            ToTensorV2(),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
         ])
 
         train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
