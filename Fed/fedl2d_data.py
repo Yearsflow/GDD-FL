@@ -13,7 +13,7 @@ from utils.dataset_utils import TensorDataset
 import torch.nn.functional as F
 from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug, get_loops
 from networks import AugNet, ConvNet, ResNet
-from torchvision import transforms
+import albumentations as A
 from utils.fedl2d_contrastive_loss import SupConLoss
 from utils.fedl2d_utils import loglikeli, club, conditional_mmd_rbf
 import math
@@ -53,20 +53,26 @@ class FedL2D(FedDistill):
                             help='learning rate for convertor')
         parser.add_argument("--beta", default=0.1, type=float,
                             help='balancing weight')
+        parser.add_argument('--gamma', type=float, default=0.9,
+                            help='balancing distribution loss and grad loss')
 
         return parser.parse_args(extra_args)
 
-    def L2D(self, net, train_dl, val_dl):
+    def L2D(self, train_dl, val_dl):
 
         convertor = AugNet(self.args.im_size[0])
         if self.args.device != 'cpu':
             convertor = nn.DataParallel(convertor)
             convertor.to(self.args.device)
         optimizer_convertor = optim.SGD(convertor.parameters(), lr=self.appr_args.con_lr)
-        optimizer_aug = optim.SGD(net.parameters(), lr=self.appr_args.aug_lr, nesterov=True, 
+        extractor = get_network(self.args)
+        if self.args.device != 'cpu':
+            extractor = nn.DataParallel(extractor)
+            extractor.to(self.args.device)
+        optimizer_aug = optim.SGD(extractor.parameters(), lr=self.appr_args.aug_lr, nesterov=True, 
                                   momentum=0.9, weight_decay=5e-4)
         scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * 0.8))
-        transform = transforms.Normalize(mean=self.args.mean, std=self.args.std)
+        transform = A.Normalize(mean=self.args.mean, std=self.args.std)
         con_loss = SupConLoss()
 
         self.logger.info('Learning to diversify')
@@ -74,7 +80,7 @@ class FedL2D(FedDistill):
         for ep in range(self.appr_args.aug_epochs):
             
             criterion = nn.CrossEntropyLoss()
-            net.train()
+            extractor.train()
             epoch_loss_collector = []
             total, correct_aug, correct = 0, 0, 0
             prob, prob_aug, targets = [], [], []
@@ -92,7 +98,7 @@ class FedL2D(FedDistill):
                 labels = torch.cat([target, target])
 
                 # forward
-                logits, tuple = net(x_aug)
+                logits, tuple = extractor(x_aug)
                 if self.args.dataset == 'isic2020':
                     for i in range(target.size(0)):
                         prob_aug.append(F.softmax(logits[i], dim=0).cpu().tolist()[1])
@@ -130,7 +136,7 @@ class FedL2D(FedDistill):
                 aug_data.append(inputs_max.detach())
 
                 # forward with the adapted parameters
-                outputs, tuples = net(x_aug)
+                outputs, tuples = extractor(x_aug)
 
                 # Upper bound MI
                 mu = tuples['mu'][target.size(0):]
@@ -170,26 +176,23 @@ class FedL2D(FedDistill):
 
             # Evaluation
             best_metric = 0
-            best_extractor = None
             best_data = None
             if self.args.dataset in ['mnist', 'cifar10']:
-                val_acc = self.eval(net, val_dl)
+                val_acc = self.eval(extractor, val_dl)
                 if val_acc > best_metric:
                     best_metric = val_acc
-                    best_extractor = copy.deepcopy(net.state_dict())
                     best_data = copy.deepcopy(aug_data)
                 self.logger.info('Epoch: %d loss: %f Train Acc w Aug: %f Train Acc w/o Aug: %f Val Acc: %f' %
                                  (ep, epoch_train_loss, epoch_train_aug_acc, epoch_train_acc, val_acc))
             else:
-                val_auc = self.eval(net, val_dl)
+                val_auc = self.eval(extractor, val_dl)
                 if val_auc > best_metric:
                     best_metric = val_auc
-                    best_extractor = copy.deepcopy(net.state_dict())
                     best_data = copy.deepcopy(aug_data)
                 self.logger.info('Epoch: %d loss: %f Train AUC w Aug: %f Train AUC w/o Aug: %f Val AUC: %f' %
                                  (ep, epoch_train_loss, epoch_train_aug_auc, epoch_train_auc, val_auc))
                 
-        return best_extractor, best_data, targets
+        return best_data, targets
     
     def epoch(self, mode, dataloader, net, optimizer, criterion, aug):
 
@@ -421,7 +424,7 @@ class FedL2D(FedDistill):
 
         return best_model
         
-    def condense(self, E, aug_E, indices_class, image_syn, label_syn, aug_ds, val_ds):
+    def condense(self, net, E, indices_class, image_syn, label_syn, aug_ds, val_ds):
 
         optimizer_img = torch.optim.SGD([image_syn, ], lr=self.appr_args.lr_img, momentum=0.5)
         optimizer_img.zero_grad()
@@ -432,13 +435,13 @@ class FedL2D(FedDistill):
 
         for it in range(self.appr_args.iter):
             
+            net.train()
             E.train()
-            aug_E.train()
-            for param in list(aug_E.parameters()):
+            for param in list(E.parameters()):
                 param.requires_grad = False
-            embed = aug_E.module.embed
-            net_parameters = list(E.parameters())
-            optimizer_net = optim.SGD(E.parameters(), lr=self.args.lr)
+            embed = E.module.embed
+            net_parameters = list(net.parameters())
+            optimizer_net = optim.SGD(net.parameters(), lr=self.args.lr)
             optimizer_net.zero_grad()
             self.appr_args.dc_aug_param = None
 
@@ -450,14 +453,14 @@ class FedL2D(FedDistill):
 
                 BN_flag = False
                 BNSizePC = 16
-                for module in E.modules():
+                for module in net.modules():
                     if 'BatchNorm' in module._get_name():
                         BN_flag = True
                 if BN_flag:
                     img_real = torch.cat([self.get_images(c, BNSizePC, indices_class, aug_ds) for c in range(self.args.n_classes)], dim=0)
-                    E.train()
-                    output_real = E(img_real)
-                    for module in E.modules():
+                    net.train()
+                    output_real = net(img_real)
+                    for module in net.modules():
                         if 'BatchNorm' in module._get_name():
                             module.eval()
 
@@ -484,12 +487,12 @@ class FedL2D(FedDistill):
 
                     loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) * (1 - self.appr_args.gamma)
 
-                    output_real = E(img_real)[0]
+                    output_real = net(img_real)[0]
                     loss_real = criterion(output_real, lab_real)
                     gw_real = torch.autograd.grad(loss_real, net_parameters)
                     gw_real = list((_.detach().clone() for _ in gw_real))
 
-                    output_syn = E(img_syn)[0]
+                    output_syn = net(img_syn)[0]
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
@@ -512,12 +515,12 @@ class FedL2D(FedDistill):
                                        batch_size=self.args.test_bs, shuffle=False, pin_memory=True)
                 for il in range(self.appr_args.inner_loop):
                     if self.args.dataset in {'isic2020', 'EyePACS'}:
-                        epoch_train_loss, epoch_train_auc = self.epoch('train', trainloader, E, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
-                        epoch_val_loss, epoch_val_auc = self.epoch('val', valloader, E, optimizer_net, criterion, aug=False)
+                        epoch_train_loss, epoch_train_auc = self.epoch('train', trainloader, net, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
+                        epoch_val_loss, epoch_val_auc = self.epoch('val', valloader, net, optimizer_net, criterion, aug=False)
                         self.logger.info('Inner Loop: %d Train loss: %f Train AUC: %f Val loss: %f Val AUC: %f' % (il, epoch_train_loss, epoch_train_auc, epoch_val_loss, epoch_val_auc))
                     else:
-                        epoch_train_loss, epoch_train_acc = self.epoch('train', trainloader, E, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
-                        epoch_val_loss, epoch_val_acc = self.epoch('val', valloader, E, optimizer_net, criterion, aug=False)
+                        epoch_train_loss, epoch_train_acc = self.epoch('train', trainloader, net, optimizer_net, criterion, aug=True if self.appr_args.dsa else False)
+                        epoch_val_loss, epoch_val_acc = self.epoch('val', valloader, net, optimizer_net, criterion, aug=False)
                         self.logger.info('Inner Loop: %d Train loss: %f Train Acc: %f Val loss: %f Val Acc: %f' % (il, epoch_train_loss, epoch_train_acc, epoch_val_loss, epoch_val_acc))
     
             loss_avg /= (self.args.n_classes * self.appr_args.outer_loop)
@@ -606,12 +609,11 @@ class FedL2D(FedDistill):
                 elif self.appr_args.init == 'noise':
                     pass
 
-                best_extractor_w, best_data, best_label = self.L2D(local_nets[client_idx], train_dl, val_dl)
+                best_data, best_label = self.L2D(train_dl, val_dl)
                 extractor = get_network(self.args)
                 if self.args.device != 'cpu':
                     extractor = nn.DataParallel(extractor)
                     extractor.to(self.args.device)
-                extractor.load_state_dict(best_extractor_w)
                 aug_img = []
                 for i in range(len(best_data)):
                     aug_img.append(best_data[i].detach().cpu())

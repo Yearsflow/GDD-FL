@@ -3,7 +3,9 @@ import os
 import numpy as np
 import torch
 from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit
-from torchvision import transforms, datasets
+from torchvision import datasets
+import albumentations as A
+from albumentations.pytorch import ToTensorV2 
 from networks import ResNet18, ConvNet, ConvNetL2D
 import torch.nn as nn
 from scipy.ndimage.interpolation import rotate as scipyrotate
@@ -52,20 +54,20 @@ def get_dataloader(args):
         val_idxs = idxs[n_train: n_train + n_val]
         public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
 
-        transform_train = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.1307], std=[0.3081])
+        transform_train = A.Compose([
+            ToTensorV2(),
+            A.Normalize(mean=[0.1307], std=[0.3081])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5], std=[0.5])
+            transform_train = A.Compose([
+                ToTensorV2(),
+                A.Normalize(mean=[0.5], std=[0.5])
             ])
 
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.1307], std=[0.3081])
+        transform_test = A.Compose([
+            ToTensorV2(),
+            A.Normalize(mean=[0.1307], std=[0.3081])
         ])
 
         train_ds = MNIST_truncated(args.datadir, dataidxs=train_idxs, train=True, transform=transform_train, download=True)
@@ -82,21 +84,21 @@ def get_dataloader(args):
         val_idxs = idxs[n_train: n_train + n_val]
         public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
 
-        transform_train = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
+        transform_train = A.Compose([
+            ToTensorV2(),
+            A.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
                                  std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transform_train = A.Compose([
+                ToTensorV2(),
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
+        transform_test = A.Compose([
+            ToTensorV2(),
+            A.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
                                  std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
         ])
 
@@ -114,7 +116,7 @@ def get_dataloader(args):
         val_idxs = idxs[n_train: n_train + n_val]
         public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
 
-        transform_train = transforms.Compose([
+        transform_train = A.Compose([
             transforms.ToPILImage(),
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -139,23 +141,23 @@ def get_dataloader(args):
         n_val, n_public = [3326, 58], [3326, 58]
         n_test = [6509, 117]
 
-        transform_train = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_train = A.Compose([
+            A.Resize(128, 128),
+            ToTensorV2(),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = transforms.Compose([
-                transforms.Resize((128, 128)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transform_train = A.Compose([
+                A.Resize(128, 128),
+                ToTensorV2(),
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
-        transform_test = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_test = A.Compose([
+            A.Resize(128, 128),
+            ToTensorV2(),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
@@ -176,23 +178,23 @@ def get_dataloader(args):
         n_public, n_val = [2581, 244, 529, 87, 70], [8130, 720, 1579, 237, 240]
         n_test = [31403, 3042, 6282, 977, 966]
 
-        transform_train = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_train = A.Compose([
+            A.Resize(128, 128),
+            ToTensorV2(),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = transforms.Compose([
-                transforms.Resize((128, 128)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transform_train = A.Compose([
+                A.Resize(128, 128),
+                ToTensorV2(),
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
-        transform_test = transforms.Compose([
-            transforms.Resize((128, 128)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transform_test = A.Compose([
+            A.Resize(128, 128),
+            ToTensorV2(),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
