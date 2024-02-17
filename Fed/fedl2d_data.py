@@ -497,7 +497,13 @@ class FedL2D(FedDistill):
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
-                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args)
+                    for i in range(len(gw_real)):
+                        if len(gw_real[i].shape) == 1:
+                            continue
+                        if len(gw_real[i].shape) == 2:
+                            continue
+                        
+                        loss += (gw_real[i] - gw_syn[i]).pow(2).sum()
                 
                 optimizer_img.zero_grad()
                 loss.backward()
