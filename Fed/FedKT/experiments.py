@@ -38,7 +38,7 @@ libsvm_datasets = {
 }
 
 
-n_workers = 0
+n_workers = 8
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -396,6 +396,43 @@ def put_all_parameters(net,X):
 
 
 def compute_accuracy(model, dataloader, get_confusion_matrix=False, device="cpu"):
+
+    was_training = False
+    if model.training:
+        model.eval()
+        was_training = True
+
+    true_labels_list, pred_labels_list = np.array([]), np.array([])
+
+    correct, total = 0, 0
+    with torch.no_grad():
+        for batch_idx, (x, target, _) in enumerate(dataloader):
+            x, target = x.to(device), target.to(device)
+            out = model(x)
+            _, pred_label = torch.max(out.data, 1)
+
+            total += x.data.size()[0]
+            correct += (pred_label == target.data).sum().item()
+
+            if device == "cpu":
+                pred_labels_list = np.append(pred_labels_list, pred_label.numpy())
+                true_labels_list = np.append(true_labels_list, target.data.numpy())
+            else:
+                pred_labels_list = np.append(pred_labels_list, pred_label.cpu().numpy())
+                true_labels_list = np.append(true_labels_list, target.data.cpu().numpy())
+
+    if get_confusion_matrix:
+        conf_matrix = confusion_matrix(true_labels_list, pred_labels_list)
+
+    if was_training:
+        model.train()
+
+    if get_confusion_matrix:
+        return correct/float(total), conf_matrix
+
+    return correct/float(total)
+
+def compute_AUC(model, dataloader, get_confusion_matrix=False, device="cpu"):
 
     was_training = False
     if model.training:
@@ -1541,14 +1578,18 @@ if __name__ == '__main__':
                 # public_ds, remain_test_ds = data.random_split(test_ds_global,
                 #                                               [public_data_size, remain_data_size])
                 remain_test_ds = test_ds_global
-                public_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers)
+                public_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers,
+                                            pin_memory=True, prefetch_factor=2*64)
 
                 # query_dl = data.DataLoader(dataset=query_ds, batch_size=32, shuffle=False)
                 # local_query_dl = data.DataLoader(dataset=local_query_ds, batch_size=32, shuffle=False)
-                remain_test_dl = data.DataLoader(dataset=remain_test_ds, batch_size=64, shuffle=False)
+                remain_test_dl = data.DataLoader(dataset=remain_test_ds, batch_size=64, shuffle=False, num_workers=n_workers,
+                                                 pin_memory=True, prefetch_factor=2*64)
 
-                query_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers)
-                local_query_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers)
+                query_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers,
+                                           pin_memory=True, prefetch_factor=2*64)
+                local_query_dl = data.DataLoader(dataset=public_ds, batch_size=64, shuffle=True, num_workers=n_workers,
+                                                 pin_memory=True, prefetch_factor=2*64)
 
                 # query_dl = data.DataLoader(dataset=public_ds, batch_size=32,
                 #                            sampler=data.SubsetRandomSampler(list(range(query_data_size))), num_workers=n_workers)
