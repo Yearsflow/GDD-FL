@@ -2,11 +2,8 @@ import random
 import os
 import numpy as np
 import torch
-from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated, DatasetSplit
-from utils.dataset_utils import ImageFolder_A
-from torchvision import datasets
-import albumentations as A
-from albumentations.pytorch import ToTensorV2 
+from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated
+from torchvision import datasets, transforms
 from networks import ResNet18, ConvNet, ConvNetL2D
 import torch.nn as nn
 from scipy.ndimage.interpolation import rotate as scipyrotate
@@ -45,126 +42,36 @@ def get_dataset_info(dataset):
 def get_dataloader(args):
 
     num_per_class = None
-    
-    if args.dataset == 'mnist':
-
-        n_train, n_val, n_public = 50000, 5000, 5000
-        idxs = [_ for _ in range(60000)]
-        random.shuffle(idxs)
-        train_idxs = idxs[: n_train]
-        val_idxs = idxs[n_train: n_train + n_val]
-        public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
-
-        transform_train = A.Compose([
-            ToTensorV2(),
-            A.Normalize(mean=[0.1307], std=[0.3081])
-        ])
-
-        if args.approach == 'fedgan':
-            transform_train = A.Compose([
-                ToTensorV2(),
-                A.Normalize(mean=[0.5], std=[0.5])
-            ])
-
-        transform_test = A.Compose([
-            ToTensorV2(),
-            A.Normalize(mean=[0.1307], std=[0.3081])
-        ])
-
-        train_ds = MNIST_truncated(args.datadir, dataidxs=train_idxs, train=True, transform=transform_train, download=True)
-        val_ds = MNIST_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
-        public_ds = MNIST_truncated(args.datadir, dataidxs=public_idxs, train=True, transform=transform_test, download=True)
-        test_ds = MNIST_truncated(args.datadir, train=False, transform=transform_test, download=True)
         
-    elif args.dataset == 'cifar10':
-
-        n_train, n_val, n_public = 40000, 5000, 5000
-        idxs = [_ for _ in range(50000)]
-        random.shuffle(idxs)
-        train_idxs = idxs[: n_train]
-        val_idxs = idxs[n_train: n_train + n_val]
-        public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
-
-        transform_train = A.Compose([
-            ToTensorV2(),
-            A.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
-                                 std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
-        ])
-
-        if args.approach == 'fedgan':
-            transform_train = A.Compose([
-                ToTensorV2(),
-                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            ])
-
-        transform_test = A.Compose([
-            ToTensorV2(),
-            A.Normalize(mean=[x / 255.0 for x in [125.3, 123.0, 113.9]], 
-                                 std=[x / 255.0 for x in [63.0, 62.1, 66.7]])
-        ])
-
-        train_ds = CIFAR10_truncated(args.datadir, dataidxs=train_idxs, train=True, transform=transform_train, download=True)
-        val_ds = CIFAR10_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
-        public_ds = CIFAR10_truncated(args.datadir, dataidxs=public_idxs, train=True, transform=transform_test, download=True)
-        test_ds = CIFAR10_truncated(args.datadir, train=False, transform=transform_test, download=True)
-        
-    elif args.dataset == 'cifar100':
-
-        n_train, n_val, n_public = 40000, 5000, 5000
-        idxs = [_ for _ in range(50000)]
-        random.shuffle(idxs)
-        train_idxs = idxs[: n_train]
-        val_idxs = idxs[n_train: n_train + n_val]
-        public_idxs = idxs[n_train + n_val: n_train + n_val + n_public]
-
-        transform_train = A.Compose([
-            transforms.ToPILImage(),
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5070751592371323, 0.48654887331495095, 0.4409178433670343],
-                                std=[0.2673342858792401, 0.2564384629170883, 0.27615047132568404])
-        ])
-
-        transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5070751592371323, 0.48654887331495095, 0.4409178433670343],
-                                std=[0.2673342858792401, 0.2564384629170883, 0.27615047132568404])
-        ])
-
-        train_ds = CIFAR100_truncated(args.datadir, dataidxs=train_idxs, train=True, transform=transform_train, download=True)
-        val_ds = CIFAR100_truncated(args.datadir, dataidxs=val_idxs, train=True, transform=transform_test, download=True)
-        test_ds = CIFAR100_truncated(args.datadir, train=False, transform=transform_test, download=True)
-        
-    elif args.dataset == 'isic2020':
+    if args.dataset == 'isic2020':
 
         n_train = [19381, 351]
         n_val, n_public = [3326, 58], [3326, 58]
         n_test = [6509, 117]
 
-        transform_train = A.Compose([
-            A.Resize(128, 128),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2(),
+        transform_train = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = A.Compose([
-                A.Resize(128, 128),
-                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-                ToTensorV2(),
+            transform_train = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
-        transform_test = A.Compose([
-            A.Resize(128, 128),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
+        transform_test = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-        train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
-        val_ds = ImageFolder_A(root=os.path.join(args.datadir, 'val'), transform=transform_test)
-        public_ds = ImageFolder_A(root=os.path.join(args.datadir, 'public'), transform=transform_test)
-        test_ds = ImageFolder_A(root=os.path.join(args.datadir, 'test'), transform=transform_test)
+        train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        val_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        public_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        test_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
@@ -179,29 +86,29 @@ def get_dataloader(args):
         n_public, n_val = [2581, 244, 529, 87, 70], [8130, 720, 1579, 237, 240]
         n_test = [31403, 3042, 6282, 977, 966]
 
-        transform_train = A.Compose([
-            A.Resize(128, 128),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
+        transform_train = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
         if args.approach == 'fedgan':
-            transform_train = A.Compose([
-                A.Resize(128, 128),
-                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-                ToTensorV2()
+            transform_train = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
             ])
 
-        transform_test = A.Compose([
-            A.Resize(128, 128),
-            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ToTensorV2()
+        transform_test = transforms.Compose([
+            transforms.Resize((128, 128)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        train_ds = ImageFolder_A(root=os.path.join(args.datadir, 'train'), transform=transform_train)
-        public_ds = ImageFolder_A(root=os.path.join(args.datadir, 'public'), transform=transform_test)
-        val_ds = ImageFolder_A(root=os.path.join(args.datadir, 'val'), transform=transform_test)
-        test_ds = ImageFolder_A(root=os.path.join(args.datadir, 'test'), transform=transform_test)
+        train_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'train'), transform=transform_train)
+        public_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'public'), transform=transform_test)
+        val_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'val'), transform=transform_test)
+        test_ds = datasets.ImageFolder(root=os.path.join(args.datadir, 'test'), transform=transform_test)
 
         num_per_class = {
             'train': n_train,
