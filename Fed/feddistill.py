@@ -12,7 +12,8 @@ from .fedavg import FedAvg
 from utils.dataset_utils import TensorDataset
 from torchvision.utils import save_image
 import torch.nn.functional as F
-from utils.common_utils import get_dataloader, DatasetSplit, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from utils.common_utils import get_dataloader, get_network, get_loops, ParamDiffAug, DiffAugment, match_loss, augment
+from utils.dataset_utils import DatasetSplit
 
 class FedDistill(FedAvg):
     def __init__(self, args, appr_args, logger):

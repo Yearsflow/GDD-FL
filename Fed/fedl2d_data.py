@@ -11,11 +11,12 @@ import random
 from .feddistill import FedDistill
 from utils.dataset_utils import TensorDataset
 import torch.nn.functional as F
-from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug, get_loops
+from utils.common_utils import get_dataloader, get_network, DiffAugment, match_loss, augment, ParamDiffAug, get_loops
 from networks import AugNet
 from utils.fedl2d_contrastive_loss import SupConLoss
 from torchvision import transforms
 from utils.fedl2d_utils import loglikeli, club, conditional_mmd_rbf
+from utils.dataset_utils import DatasetSplit
 import math
 
 class FedL2D(FedDistill):
@@ -485,7 +486,7 @@ class FedL2D(FedDistill):
                     img_syn = img_syn.to(self.args.device, non_blocking=True)
                     feature_syn = embed(img_syn)
 
-                    loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) * (1 - self.appr_args.gamma)
+                    loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) 
 
                     output_real = net(img_real)[0]
                     loss_real = criterion(output_real, lab_real)
@@ -496,7 +497,7 @@ class FedL2D(FedDistill):
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
-                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args) * self.appr_args.gamma
+                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args) 
                 
                 optimizer_img.zero_grad()
                 loss.backward()
