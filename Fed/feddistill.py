@@ -119,7 +119,7 @@ class FedDistill(FedAvg):
                 
                 if self.args.approach in {'feddc', 'feddsa'}:
                     best_img_syn, best_lab_syn = self.DC(local_nets[c_id], indices_class, image_syn, label_syn, train_ds_c, val_ds_c)
-                elif self.args.approach == 'feddm':
+                elif self.args.approach in {'feddm', 'fedgdd'}:
                     best_img_syn, best_lab_syn = self.DM(local_nets[c_id], indices_class, image_syn, label_syn, train_ds_c)
 
                 self.save(best_img_syn, best_lab_syn, c_id)

@@ -26,7 +26,8 @@ if __name__ == '__main__':
             from Fed.fedavg import FedAvg as alg
         elif args.approach == 'fedproto':
             from Fed.fedproto import FedProto as alg
-        elif args.approach == 'feddc' or args.approach == 'feddsa' or args.approach == 'feddm':
+        elif args.approach == 'feddc' or args.approach == 'feddsa' or \
+            args.approach == 'feddm' or args.approach == 'fedgdd':
             from Fed.feddistill import FedDistill as alg
         elif args.approach == 'fedgan':
             from Fed.fedgan import FedGAN as alg
