@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch
 from utils.fedl2d_utils import reparametrize
+from utils.fedgdd_dsu import DistributionUncertainty
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -128,14 +129,20 @@ class ResNet(nn.Module):
         return out
     
 ''' UResNet '''
-class UResNet(ResNet):
+class UResNet(nn.Module):
     def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm', pertubration=None, uncertainty=0.0):
-        super(UResNet, self).__init__(block, num_blocks, channel, num_classes, norm)
+        super(UResNet, self).__init__()
+        self.in_planes = 64
+        self.norm = norm
+
+        self.conv1 = nn.Conv2d(channel, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.GroupNorm(64, 64, affine=True) if self.norm == 'instancenorm' else nn.BatchNorm2d(64)
         self.pertubration = pertubration(p=uncertainty) if pertubration else nn.Identity()
         self.layer1 = self._make_layer(block, 64, num_blocks[0], 1, pertubration, uncertainty)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], 2, pertubration, uncertainty)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], 2, pertubration, uncertainty)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], 2, pertubration, uncertainty)
+        self.classifier = nn.Linear(512*block.expansion, num_classes)
 
     def _make_layer(self, block, planes, num_blocks, stride, pertubration, uncertainty):
         strides = [stride] + [1]*(num_blocks-1)
@@ -228,11 +235,15 @@ class ResNetL2D(ResNet):
         return out, end_points
     
 class ResNetGDD(ResNet):
-    def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm', pertubration=None, uncertainty=0.0):
+    def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm', pertubration=None, uncertainty=0.0, dataset='isic2020'):
         super(ResNetGDD, self).__init__(block, num_blocks, channel, num_classes, norm)
 
         self.ResNet = ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
-        self.UResNet = UResNet(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
+        num_ftrs = self.ResNet.classifier.in_features
+        self.ResNet.classifier = nn.Linear(num_ftrs * 4 * 4, num_classes)
+        self.UResNet = UResNet(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, pertubration=pertubration, uncertainty=uncertainty)
+        num_ftrs = self.UResNet.classifier.in_features
+        self.UResNet.classifier = nn.Linear(num_ftrs * 4 * 4, num_classes)
         self.classifier = nn.Linear(512 * block.expansion * 2, num_classes)
 
     def forward(self, x):
@@ -244,8 +255,8 @@ class ResNetGDD(ResNet):
         return out
     
     def embed(self, x):
-        x1 = self.ConvFeatures(x)
-        x2 = self.UConvFeatures(x)
+        x1 = self.ResNet(x)
+        x2 = self.UResNet(x)
         out = torch.cat((x1, x2), dim=1)
         out = out.view(out.size(0), -1)
         return out
@@ -256,7 +267,8 @@ def ResNet18(args, channel, num_classes, norm='instancenorm'):
     elif args.approach == 'fedl2d':
         return ResNetL2D(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, dataset=args.dataset)
     elif args.approach == 'fedgdd':
-        return ResNetGDD(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
+        return ResNetGDD(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, 
+                        pertubration=DistributionUncertainty, uncertainty=0.5, dataset=args.dataset)
     return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
 
 def ResNet34(channel, num_classes):
