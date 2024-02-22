@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from utils.dataset_utils import MNIST_truncated, CIFAR10_truncated, CIFAR100_truncated
 from torchvision import datasets, transforms
-from networks import ResNet18, ConvNet, ConvNetL2D
+from networks import ResNet18, ConvNet, ConvNetL2D, ResNetGDD
 import torch.nn as nn
 from scipy.ndimage.interpolation import rotate as scipyrotate
 import torch.nn.functional as F
@@ -142,10 +142,10 @@ def get_default_convnet_setting():
     net_width, net_depth, net_act, net_norm, net_pooling = 128, 3, 'relu', 'instancenorm', 'avgpooling'
     return net_width, net_depth, net_act, net_norm, net_pooling
     
-def get_network(args):
+def get_network(args, is_global=False):
     
     if args.model == 'ResNet18':
-        net = ResNet18(args=args, channel=args.channel, num_classes=args.n_classes)
+        net = ResNet18(args=args, channel=args.channel, num_classes=args.n_classes, is_global=is_global)
     elif args.model == 'ConvNet':
         net_width, net_depth, net_act, net_norm, net_pooling = get_default_convnet_setting()
         if args.approach == 'fedl2d':

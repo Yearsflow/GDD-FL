@@ -261,14 +261,15 @@ class ResNetGDD(ResNet):
         out = out.view(out.size(0), -1)
         return out
 
-def ResNet18(args, channel, num_classes, norm='instancenorm'):
-    if args.approach == 'fedproto':
-        return ResNetProto(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
-    elif args.approach == 'fedl2d':
-        return ResNetL2D(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, dataset=args.dataset)
-    elif args.approach == 'fedgdd':
-        return ResNetGDD(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, 
-                        pertubration=DistributionUncertainty, uncertainty=0.5, dataset=args.dataset)
+def ResNet18(args, channel, num_classes, norm='instancenorm', is_global=False):
+    if not is_global:
+        if args.approach == 'fedproto':
+            return ResNetProto(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
+        elif args.approach == 'fedl2d':
+            return ResNetL2D(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, dataset=args.dataset)
+        elif args.approach == 'fedgdd':
+            return ResNetGDD(UBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm, 
+                            pertubration=DistributionUncertainty, uncertainty=0.5, dataset=args.dataset)
     return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm=norm)
 
 def ResNet34(channel, num_classes):

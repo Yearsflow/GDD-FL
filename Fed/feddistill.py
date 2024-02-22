@@ -66,7 +66,7 @@ class FedDistill(FedAvg):
             self.args.model = model
         else:
             local_nets = [get_network(self.args) for _ in range(self.args.C)]
-        global_net = get_network(self.args)
+        global_net = get_network(self.args, is_global=True)
 
         self.logger.info('Training begins...')
 
