@@ -72,7 +72,7 @@ class FedL2D(FedDistill):
             extractor.to(self.args.device)
         optimizer_aug = optim.SGD(extractor.parameters(), lr=self.appr_args.aug_lr, nesterov=True, 
                                   momentum=0.9, weight_decay=5e-4)
-        scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * 0.8))
+        scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * 0.5))
         transform = transforms.Normalize(mean=self.args.mean, std=self.args.std)
         con_loss = SupConLoss()
 
@@ -486,7 +486,7 @@ class FedL2D(FedDistill):
                     img_syn = img_syn.to(self.args.device, non_blocking=True)
                     feature_syn = embed(img_syn)
 
-                    loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) 
+                    loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) * (1 - self.appr_args.gamma)
 
                     output_real = net(img_real)[0]
                     loss_real = criterion(output_real, lab_real)
@@ -497,7 +497,7 @@ class FedL2D(FedDistill):
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
-                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args) 
+                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args) * self.appr_args.gamma
                 
                 optimizer_img.zero_grad()
                 loss.backward()
