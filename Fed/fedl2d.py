@@ -11,9 +11,9 @@ import random
 from .feddistill import FedDistill
 from utils.dataset_utils import TensorDataset
 import torch.nn.functional as F
-from utils.common_utils import get_dataloader, DatasetSplit, get_network, DiffAugment, match_loss, augment, ParamDiffAug, get_loops
-from networks import AugNet, ConvNet, ResNet
-import albumentations as A
+from utils.dataset_utils import DatasetSplit
+from utils.common_utils import get_dataloader, get_network, DiffAugment, match_loss, augment, ParamDiffAug, get_loops
+from networks import AugNet
 from utils.fedl2d_contrastive_loss import SupConLoss
 from torchvision import transforms
 from utils.fedl2d_utils import loglikeli, club, conditional_mmd_rbf
@@ -54,8 +54,8 @@ class FedL2D(FedDistill):
                             help='learning rate for convertor')
         parser.add_argument("--beta", default=0.1, type=float,
                             help='balancing weight')
-        parser.add_argument('--gamma', type=float, default=0.9,
-                            help='balancing distribution loss and grad loss')
+        parser.add_argument('--gamma', type=float, default=0.8,
+                            help='step size for StepLR scheduler')
 
         return parser.parse_args(extra_args)
 
@@ -72,7 +72,7 @@ class FedL2D(FedDistill):
             extractor.to(self.args.device)
         optimizer_aug = optim.SGD(extractor.parameters(), lr=self.appr_args.aug_lr, nesterov=True, 
                                   momentum=0.9, weight_decay=5e-4)
-        scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * 0.8))
+        scheduler = optim.lr_scheduler.StepLR(optimizer_aug, step_size=int(self.appr_args.aug_epochs * self.appr_args.gamma))
         transform = transforms.Normalize(mean=self.args.mean, std=self.args.std)
         con_loss = SupConLoss()
 
@@ -482,12 +482,6 @@ class FedL2D(FedDistill):
                         img_real = DiffAugment(img_real, self.appr_args.dsa_strategy, seed=seed, param=self.appr_args.dsa_param)
                         img_syn = DiffAugment(img_syn, self.appr_args.dsa_strategy, seed=seed, param=self.appr_args.dsa_param)
 
-                    feature_real = embed(img_real).detach()
-                    img_syn = img_syn.to(self.args.device, non_blocking=True)
-                    feature_syn = embed(img_syn)
-
-                    loss += torch.sum((torch.mean(feature_real, dim=0) - torch.mean(feature_syn, dim=0)) ** 2) * (1 - self.appr_args.gamma)
-
                     output_real = net(img_real)[0]
                     loss_real = criterion(output_real, lab_real)
                     gw_real = torch.autograd.grad(loss_real, net_parameters)
@@ -497,7 +491,7 @@ class FedL2D(FedDistill):
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
-                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args) * self.appr_args.gamma
+                    loss += match_loss(gw_syn, gw_real, self.args, self.appr_args)
                 
                 optimizer_img.zero_grad()
                 loss.backward()
