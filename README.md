@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This is the official release of the paper **Communication-Efficient Federated Skin Lesion Classification with Generalizable Dataset Distillation**, along with the network implementation.
+This is the official release of the paper **Communication-Efficient Federated Skin Lesion Classification with Generalizable Dataset Distillation**, along with the network implementation and training scripts.
 
 > **Yuchen Tian**, Jiacheng Wang, Yueming Jin, Liansheng Wang <br/>
 > In: International Conference on Medical Image Computing and Computer-Assisted Intervention (MICCAI), 2023 <br />
@@ -13,12 +13,17 @@ This is the official release of the paper **Communication-Efficient Federated Sk
 
 In this paper, we perform the experiments using a public medical dataset ISIC-2020.
 
+#### Training & Testing
+
+Run the script ```python main.py```
+
 #### Result
 
 <div align="center" border=> <img src=result.png width="700"> </div>
 
 ## Citation
 
+```
 @inproceedings{tian2023communication,
   title={Communication-efficient federated skin lesion classification with generalizable dataset distillation},
   author={Tian, Yuchen and Wang, Jiacheng and Jin, Yueming and Wang, Liansheng},
@@ -27,3 +32,4 @@ In this paper, we perform the experiments using a public medical dataset ISIC-20
   year={2023},
   organization={Springer}
 }
+```
